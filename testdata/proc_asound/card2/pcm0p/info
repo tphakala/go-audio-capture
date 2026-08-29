@@ -1,0 +1,7 @@
+card: 2
+device: 0
+subdevice: 0
+stream: PLAYBACK
+id: USB Audio
+name: USB Audio #1
+subname: subdevice #0
