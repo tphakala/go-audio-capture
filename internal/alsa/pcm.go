@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -19,7 +20,12 @@ type ioctlFunc func(fd int, req uintptr, arg unsafe.Pointer) error
 
 // PCM is an open capture PCM device.
 type PCM struct {
-	fd    int
+	// fd is the capture device fd, held atomically because Close may run on a
+	// different goroutine to unblock a parked ReadI (the documented
+	// unblock-a-parked-reader path). That crosses the fd read in ReadI's ioctl
+	// call with the fd invalidation in Close, so both go through the atomic.
+	// Close swaps in -1 to claim the fd exactly once, making it idempotent.
+	fd    atomic.Int32
 	ioctl ioctlFunc
 	// xferi is reused across ReadI calls so the per-read transfer descriptor
 	// never heap-allocates. ReadI is single-consumer (Stream.Read drives it),
@@ -73,7 +79,16 @@ func OpenPCM(card, device int) (*PCM, error) {
 	if err != nil {
 		return nil, &ioctlError{Op: "open " + path, Err: err}
 	}
-	return &PCM{fd: fd, ioctl: ioctl}, nil
+	return newPCM(fd, ioctl), nil
+}
+
+// newPCM builds a PCM with the fd stored atomically. It is the single
+// construction point (production and tests) so no caller sets the atomic fd via
+// a struct literal, which cannot express it.
+func newPCM(fd int, ioctl ioctlFunc) *PCM {
+	p := &PCM{ioctl: ioctl}
+	p.fd.Store(int32(fd))
+	return p
 }
 
 // Negotiate configures the hardware for the requested format via HW_REFINE then
@@ -147,7 +162,7 @@ func (p *PCM) setSwParams(n Negotiated) error {
 		StopThreshold:  ^uint64(0),
 		Boundary:       boundary(uint64(n.BufferFrames)),
 	}
-	if err := p.ioctl(p.fd, iocSwParams, unsafe.Pointer(&sw)); err != nil {
+	if err := p.ioctl(int(p.fd.Load()), iocSwParams, unsafe.Pointer(&sw)); err != nil {
 		return &ioctlError{Op: "SW_PARAMS", Err: err}
 	}
 	return nil
@@ -160,7 +175,7 @@ func (p *PCM) Prepare() error { return p.control(iocPrepare, "PREPARE") }
 func (p *PCM) Start() error { return p.control(iocStart, "START") }
 
 func (p *PCM) control(req uintptr, op string) error {
-	if err := p.ioctl(p.fd, req, nil); err != nil {
+	if err := p.ioctl(int(p.fd.Load()), req, nil); err != nil {
 		return &ioctlError{Op: op, Err: err}
 	}
 	return nil
@@ -177,7 +192,7 @@ func (p *PCM) ReadI(buf []byte, frames int) (int, error) {
 	// Reuse the preallocated descriptor; Result is overwritten by the ioctl.
 	p.xferi.Buf = unsafe.Pointer(&buf[0])
 	p.xferi.Frames = uint64(frames)
-	err := p.ioctl(p.fd, iocReadIFrames, unsafe.Pointer(&p.xferi))
+	err := p.ioctl(int(p.fd.Load()), iocReadIFrames, unsafe.Pointer(&p.xferi))
 	runtime.KeepAlive(buf)
 	if err != nil {
 		return 0, err
@@ -201,7 +216,7 @@ func (p *PCM) Recover(err error) error {
 		return p.Start()
 	case errors.Is(err, unix.ESTRPIPE):
 		for {
-			e := p.ioctl(p.fd, iocResume, nil)
+			e := p.ioctl(int(p.fd.Load()), iocResume, nil)
 			if e == nil || errors.Is(e, unix.ENOSYS) {
 				break // resumed, or driver has no RESUME: fall through to prepare
 			}
@@ -224,24 +239,23 @@ func (p *PCM) Recover(err error) error {
 // DROP unblocks any reader currently parked in READI_FRAMES so it returns and
 // the read goroutine can exit.
 func (p *PCM) Close() error {
-	if p.fd < 0 {
+	fd := p.fd.Swap(-1)
+	if fd < 0 {
 		return nil
 	}
-	_ = p.ioctl(p.fd, iocDrop, nil) // best effort: unblock a parked reader
-	err := unix.Close(p.fd)
-	p.fd = -1
-	return err
+	_ = p.ioctl(int(fd), iocDrop, nil) // best effort: unblock a parked reader
+	return unix.Close(int(fd))
 }
 
 func (p *PCM) refine(hw *HwParams) error {
-	if err := p.ioctl(p.fd, iocHwRefine, unsafe.Pointer(hw)); err != nil {
+	if err := p.ioctl(int(p.fd.Load()), iocHwRefine, unsafe.Pointer(hw)); err != nil {
 		return &ioctlError{Op: "HW_REFINE", Err: err}
 	}
 	return nil
 }
 
 func (p *PCM) hwParams(hw *HwParams) error {
-	if err := p.ioctl(p.fd, iocHwParams, unsafe.Pointer(hw)); err != nil {
+	if err := p.ioctl(int(p.fd.Load()), iocHwParams, unsafe.Pointer(hw)); err != nil {
 		return &ioctlError{Op: "HW_PARAMS", Err: err}
 	}
 	return nil

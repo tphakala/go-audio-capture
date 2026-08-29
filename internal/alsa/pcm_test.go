@@ -4,6 +4,7 @@ package alsa
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"unsafe"
 
@@ -27,7 +28,7 @@ func TestNegotiateRefusesBadRate(t *testing.T) {
 		}
 		return nil
 	}
-	p := &PCM{fd: -1, ioctl: fake}
+	p := newPCM(-1, fake)
 	_, err := p.Negotiate(256000, 1, FormatS16LE, 960, 4)
 	var bre *BadRateError
 	if !errors.As(err, &bre) {
@@ -59,7 +60,7 @@ func TestNegotiateSucceeds(t *testing.T) {
 		}
 		return nil
 	}
-	p := &PCM{fd: -1, ioctl: fake}
+	p := newPCM(-1, fake)
 	n, err := p.Negotiate(256000, 1, FormatS16LE, 5120, 4)
 	if err != nil {
 		t.Fatalf("Negotiate = %v", err)
@@ -81,7 +82,7 @@ func TestReadIReturnsFrameCount(t *testing.T) {
 		}
 		return nil
 	}
-	p := &PCM{fd: -1, ioctl: fake}
+	p := newPCM(-1, fake)
 	buf := make([]byte, 960*2)
 	n, err := p.ReadI(buf, 960)
 	if err != nil || n != 960 {
@@ -96,14 +97,14 @@ func TestReadIPropagatesErrno(t *testing.T) {
 		}
 		return nil
 	}
-	p := &PCM{fd: -1, ioctl: fake}
+	p := newPCM(-1, fake)
 	if _, err := p.ReadI(make([]byte, 4), 1); !errors.Is(err, unix.EPIPE) {
 		t.Fatalf("ReadI err = %v, want EPIPE", err)
 	}
 }
 
 func TestReadIRejectsEmpty(t *testing.T) {
-	p := &PCM{fd: -1, ioctl: func(int, uintptr, unsafe.Pointer) error { return nil }}
+	p := newPCM(-1, func(int, uintptr, unsafe.Pointer) error { return nil })
 	if n, err := p.ReadI(nil, 0); n != 0 || err != nil {
 		t.Fatalf("ReadI(nil,0) = %d, %v; want 0, nil", n, err)
 	}
@@ -120,7 +121,7 @@ func TestRecoverTurnsXrunIntoRestart(t *testing.T) {
 		}
 		return nil
 	}
-	p := &PCM{fd: -1, ioctl: fake}
+	p := newPCM(-1, fake)
 	if err := p.Recover(unix.EPIPE); err != nil {
 		t.Fatalf("Recover(EPIPE) = %v, want nil", err)
 	}
@@ -130,9 +131,53 @@ func TestRecoverTurnsXrunIntoRestart(t *testing.T) {
 }
 
 func TestRecoverPassesThroughUnrecoverable(t *testing.T) {
-	p := &PCM{fd: -1, ioctl: func(int, uintptr, unsafe.Pointer) error { return nil }}
+	p := newPCM(-1, func(int, uintptr, unsafe.Pointer) error { return nil })
 	sentinel := errors.New("boom")
 	if err := p.Recover(sentinel); !errors.Is(err, sentinel) {
 		t.Fatalf("Recover(sentinel) = %v, want the sentinel unchanged", err)
+	}
+}
+
+// TestReadICloseRace exercises the documented path where Close is called from
+// another goroutine to unblock a parked ReadI: Close invalidates p.fd while
+// ReadI reads it for the ioctl. With p.fd held atomically this is race-free;
+// run under -race, where the previous plain-int field would have been flagged.
+// A real /dev/null fd is used so Close's Swap claims a non-negative value and
+// runs its full DROP + unix.Close path (the fake ioctl replaces the real
+// syscall, so nothing depends on the fd's kernel behavior).
+func TestReadICloseRace(t *testing.T) {
+	fd, err := unix.Open("/dev/null", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Skipf("cannot open /dev/null: %v", err)
+	}
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		if req == iocReadIFrames {
+			(*Xferi)(arg).Result = 0
+		}
+		return nil
+	}
+	p := newPCM(fd, fake)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 8)
+		for i := 0; i < 2000; i++ {
+			if _, rerr := p.ReadI(buf, 1); rerr != nil {
+				return
+			}
+		}
+	}()
+
+	// Concurrently invalidate the fd, as a cross-goroutine Close would.
+	if cerr := p.Close(); cerr != nil {
+		t.Errorf("Close: %v", cerr)
+	}
+	wg.Wait()
+
+	// Close is idempotent: a second call claims nothing and is a no-op.
+	if cerr := p.Close(); cerr != nil {
+		t.Errorf("second Close: %v", cerr)
 	}
 }
