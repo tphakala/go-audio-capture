@@ -45,3 +45,15 @@ type DeviceInfo struct {
 	Device int
 	Name   string
 }
+
+// Config requests a capture configuration. Rate is honored exactly or Open
+// fails with *BadRateError: there is no silent resampling. PeriodFrames and
+// Periods default to a 20 ms period (Rate/50) and 4 periods when left zero.
+type Config struct {
+	Device       string // "hw:card,device", e.g. "hw:1,0"
+	Rate         int    // requested sample rate in Hz
+	Channels     int    // 1 or 2
+	Format       Format
+	PeriodFrames int // frames per period; 0 => Rate/50 (20 ms)
+	Periods      int // periods per buffer; 0 => 4
+}
