@@ -232,6 +232,32 @@ func TestFillCarriesOverflow(t *testing.T) {
 	}
 }
 
+// TestFillCarrySpansManyReads drains ONE packet across several under-sized reads,
+// exercising the partial-drain path where carryOff advances to an intermediate
+// value (0 < carryOff < len(carryBuf)) and fill early-returns WITHOUT resetting —
+// the distinct bookkeeping the equal-size carry tests never reach. The whole
+// packet must come back, in order, across the reads.
+func TestFillCarrySpansManyReads(t *testing.T) {
+	// A 6-frame packet through 2-frame buffers: 3 reads, carryOff stepping
+	// 0 -> 4 (intermediate, no reset) -> 8 (drains, resets).
+	c, _ := fillClient(1, 16, []capturePacket{{data: pcm16seq(6, 0x10), frames: 6, devPos: 0}})
+	got := make([]byte, 0, 6*2)
+	for i := 0; i < 3; i++ {
+		buf := make([]byte, 2*2)
+		n, _, err := c.fill(buf)
+		if err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+		if n != 2 {
+			t.Fatalf("read %d delivered %d frames, want 2", i, n)
+		}
+		got = append(got, buf...)
+	}
+	if want := pcm16seq(6, 0x10); !bytes.Equal(got, want) {
+		t.Errorf("reassembled %v, want the full 6-frame packet in order %v", got, want)
+	}
+}
+
 func TestFillSilentDeliversZeros(t *testing.T) {
 	c, _ := fillClient(1, 16, []capturePacket{{data: nil, frames: 4, devPos: 0, flags: bufferFlagsSilent}})
 	buf := bytes.Repeat([]byte{0xFF}, 4*2)

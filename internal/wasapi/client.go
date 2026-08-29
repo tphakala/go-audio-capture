@@ -4,6 +4,7 @@ package wasapi
 
 import (
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -32,8 +33,15 @@ type Client struct {
 	audioEvent windows.Handle // auto-reset: signaled when a buffer is ready
 	closeEvent windows.Handle // manual-reset: signaled by Close
 
-	neg   Negotiated
-	carry []byte // whole-frame overflow from a packet larger than the caller's buffer
+	neg Negotiated
+	// carryBuf retains whole-frame overflow from a packet larger than the caller's
+	// buffer; the still-unread bytes are carryBuf[carryOff:]. It is reset with
+	// carryBuf[:0] (not resliced past carryOff) so a fresh overflow appends into
+	// the retained capacity instead of allocating — making Read amortized zero-alloc
+	// even when the caller under-sizes its buffer (only the first overflow, and any
+	// growth past the retained capacity, allocates).
+	carryBuf []byte
+	carryOff int
 
 	nextPos uint64 // monotonic high-water mark of delivered device frames, for overlap/gap detection
 	havePos bool   // whether nextPos has been seeded by the first packet
@@ -259,10 +267,16 @@ func (c *Client) fill(buf []byte) (frames int, discontinuity bool, err error) {
 	whole := (len(buf) / frameBytes) * frameBytes
 	n := 0
 
-	if len(c.carry) > 0 {
-		m := copy(buf[:whole], c.carry)
-		c.carry = c.carry[m:]
+	if c.carryOff < len(c.carryBuf) {
+		m := copy(buf[:whole], c.carryBuf[c.carryOff:])
+		c.carryOff += m
 		n += m
+		if c.carryOff >= len(c.carryBuf) {
+			// Fully drained: reset to length 0 (keeping capacity) so the next
+			// overflow append reuses this backing array rather than allocating.
+			c.carryBuf = c.carryBuf[:0]
+			c.carryOff = 0
+		}
 		if n == whole {
 			return n / frameBytes, false, nil
 		}
@@ -324,12 +338,17 @@ func (c *Client) fill(buf []byte) (frames int, discontinuity bool, err error) {
 			copy(buf[n:n+copied], pkt.data[off:off+pktBytes])
 		}
 		if copied < pktBytes {
-			// Overflow beyond the caller's buffer: keep the remainder for the
-			// next Read (SILENT contributes zeros).
+			// Overflow beyond the caller's buffer: keep the remainder for the next
+			// Read (SILENT contributes zeros). carryBuf is empty here (any prior
+			// carry was fully drained above), so these appends into carryBuf[:0]
+			// reuse its retained capacity instead of allocating.
+			c.carryOff = 0
 			if pkt.flags&bufferFlagsSilent != 0 || pkt.data == nil {
-				c.carry = append(c.carry, make([]byte, pktBytes-copied)...)
+				need := pktBytes - copied
+				c.carryBuf = slices.Grow(c.carryBuf[:0], need)[:need]
+				clear(c.carryBuf)
 			} else {
-				c.carry = append(c.carry, pkt.data[off+copied:off+pktBytes]...)
+				c.carryBuf = append(c.carryBuf[:0], pkt.data[off+copied:off+pktBytes]...)
 			}
 		}
 		n += copied
