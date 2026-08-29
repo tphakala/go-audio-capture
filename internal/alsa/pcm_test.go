@@ -4,11 +4,25 @@ package alsa
 
 import (
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
+
+// openDevNull returns a real fd (backed by /dev/null) whose lifetime the test's
+// PCM.Close will manage, or skips if it cannot be opened.
+func openDevNull(t *testing.T) int {
+	t.Helper()
+	fd, err := unix.Open("/dev/null", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Skipf("cannot open /dev/null: %v", err)
+	}
+	return fd
+}
 
 // setInterval is a tiny helper for the fake kernel to narrow a parameter.
 func setInterval(hw *HwParams, param int, lo, hi uint32) {
@@ -27,7 +41,7 @@ func TestNegotiateRefusesBadRate(t *testing.T) {
 		}
 		return nil
 	}
-	p := &PCM{fd: -1, ioctl: fake}
+	p := newPCM(-1, fake)
 	_, err := p.Negotiate(256000, 1, FormatS16LE, 960, 4)
 	var bre *BadRateError
 	if !errors.As(err, &bre) {
@@ -59,7 +73,7 @@ func TestNegotiateSucceeds(t *testing.T) {
 		}
 		return nil
 	}
-	p := &PCM{fd: -1, ioctl: fake}
+	p := newPCM(-1, fake)
 	n, err := p.Negotiate(256000, 1, FormatS16LE, 5120, 4)
 	if err != nil {
 		t.Fatalf("Negotiate = %v", err)
@@ -81,7 +95,7 @@ func TestReadIReturnsFrameCount(t *testing.T) {
 		}
 		return nil
 	}
-	p := &PCM{fd: -1, ioctl: fake}
+	p := newPCM(-1, fake)
 	buf := make([]byte, 960*2)
 	n, err := p.ReadI(buf, 960)
 	if err != nil || n != 960 {
@@ -96,14 +110,14 @@ func TestReadIPropagatesErrno(t *testing.T) {
 		}
 		return nil
 	}
-	p := &PCM{fd: -1, ioctl: fake}
+	p := newPCM(-1, fake)
 	if _, err := p.ReadI(make([]byte, 4), 1); !errors.Is(err, unix.EPIPE) {
 		t.Fatalf("ReadI err = %v, want EPIPE", err)
 	}
 }
 
 func TestReadIRejectsEmpty(t *testing.T) {
-	p := &PCM{fd: -1, ioctl: func(int, uintptr, unsafe.Pointer) error { return nil }}
+	p := newPCM(-1, func(int, uintptr, unsafe.Pointer) error { return nil })
 	if n, err := p.ReadI(nil, 0); n != 0 || err != nil {
 		t.Fatalf("ReadI(nil,0) = %d, %v; want 0, nil", n, err)
 	}
@@ -120,7 +134,7 @@ func TestRecoverTurnsXrunIntoRestart(t *testing.T) {
 		}
 		return nil
 	}
-	p := &PCM{fd: -1, ioctl: fake}
+	p := newPCM(-1, fake)
 	if err := p.Recover(unix.EPIPE); err != nil {
 		t.Fatalf("Recover(EPIPE) = %v, want nil", err)
 	}
@@ -130,9 +144,207 @@ func TestRecoverTurnsXrunIntoRestart(t *testing.T) {
 }
 
 func TestRecoverPassesThroughUnrecoverable(t *testing.T) {
-	p := &PCM{fd: -1, ioctl: func(int, uintptr, unsafe.Pointer) error { return nil }}
+	p := newPCM(-1, func(int, uintptr, unsafe.Pointer) error { return nil })
 	sentinel := errors.New("boom")
 	if err := p.Recover(sentinel); !errors.Is(err, sentinel) {
 		t.Fatalf("Recover(sentinel) = %v, want the sentinel unchanged", err)
+	}
+}
+
+// TestReadICloseRace exercises the documented path where Close runs on another
+// goroutine to unblock a parked ReadI. Beyond -race cleanliness on the shared
+// bookkeeping, it asserts the TOCTOU property the in-flight guard provides: no
+// READI_FRAMES ioctl is ever issued after Close has returned (which implies the
+// fd was closed), so the fd cannot be closed under a live syscall. Run under
+// -race. A real /dev/null fd is used so Close runs its full DROP + unix.Close
+// path; the fake ioctl replaces the real syscall.
+func TestReadICloseRace(t *testing.T) {
+	fd := openDevNull(t)
+	var closeReturned atomic.Bool
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		if req == iocReadIFrames {
+			if closeReturned.Load() {
+				t.Error("READI_FRAMES ioctl issued after Close returned")
+			}
+			(*Xferi)(arg).Result = 0
+		}
+		return nil
+	}
+	p := newPCM(fd, fake)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 8)
+		for i := 0; i < 2000; i++ {
+			if _, rerr := p.ReadI(buf, 1); rerr != nil {
+				return // stops once Close makes acquire return EBADF
+			}
+		}
+	}()
+
+	if cerr := p.Close(); cerr != nil {
+		t.Errorf("Close: %v", cerr)
+	}
+	closeReturned.Store(true)
+	wg.Wait()
+
+	// Close is idempotent: a second call claims nothing and is a no-op.
+	if cerr := p.Close(); cerr != nil {
+		t.Errorf("second Close: %v", cerr)
+	}
+}
+
+// TestCloseWaitsForInFlightReadI proves Close blocks until an in-flight ReadI
+// ioctl returns before it closes the fd (the core of the TOCTOU fix). The fake
+// parks inside READI_FRAMES until the test releases it; DROP is a no-op so the
+// test, not the kernel, controls when the read returns.
+func TestCloseWaitsForInFlightReadI(t *testing.T) {
+	fd := openDevNull(t)
+	entered := make(chan struct{})
+	releaseRead := make(chan struct{})
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		if req == iocReadIFrames {
+			close(entered)
+			<-releaseRead
+			(*Xferi)(arg).Result = 0
+		}
+		return nil
+	}
+	p := newPCM(fd, fake)
+
+	var readReturned atomic.Bool
+	go func() {
+		buf := make([]byte, 8)
+		_, _ = p.ReadI(buf, 1)
+		readReturned.Store(true)
+	}()
+
+	<-entered // the read is now parked inside the ioctl
+
+	closeDone := make(chan struct{})
+	go func() {
+		_ = p.Close()
+		close(closeDone)
+	}()
+
+	// Close must not complete while the read is still in flight.
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned before the in-flight ReadI finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if readReturned.Load() {
+		t.Fatal("ReadI returned before it was released")
+	}
+
+	close(releaseRead)
+	<-closeDone
+	if !readReturned.Load() {
+		t.Fatal("ReadI did not return after release")
+	}
+}
+
+// TestCloseUnblocksParkedReadI is the liveness guard: a reader parked in
+// READI_FRAMES is woken by Close's DROP. It is also the regression test against
+// any future design that holds a lock across the blocking ioctl, which would
+// deadlock here. The fake blocks the read until it observes the DROP.
+func TestCloseUnblocksParkedReadI(t *testing.T) {
+	fd := openDevNull(t)
+	entered := make(chan struct{})
+	drop := make(chan struct{})
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		switch req {
+		case iocReadIFrames:
+			close(entered) // the read has acquired the guard and is now parked
+			<-drop         // park inside the ioctl until Close issues DROP
+			return unix.EBADFD
+		case iocDrop:
+			close(drop)
+		}
+		return nil
+	}
+	p := newPCM(fd, fake)
+
+	readDone := make(chan struct{})
+	go func() {
+		buf := make([]byte, 8)
+		_, _ = p.ReadI(buf, 1)
+		close(readDone)
+	}()
+
+	// Do not start Close until the reader is genuinely parked inside the ioctl;
+	// otherwise Close could win the mutex first and the reader would never park,
+	// making this a vacuous test of the DROP-unblocks-a-parked-reader path (and
+	// of the deadlock a lock-across-the-syscall design would cause).
+	<-entered
+
+	done := make(chan struct{})
+	go func() {
+		_ = p.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return: parked ReadI was not unblocked (possible deadlock)")
+	}
+	select {
+	case <-readDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadI did not return after Close unblocked it")
+	}
+}
+
+// TestReadIAfterCloseReturnsEBADF verifies that once Close has run, ReadI issues
+// no ioctl and returns EBADF (which Stream.Read maps to ErrClosed), and that a
+// guarded Recover likewise fails closed rather than touching the fd.
+func TestReadIAfterCloseReturnsEBADF(t *testing.T) {
+	fd := openDevNull(t)
+	var issued atomic.Bool
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		if req == iocReadIFrames {
+			issued.Store(true)
+			(*Xferi)(arg).Result = 0
+		}
+		return nil
+	}
+	p := newPCM(fd, fake)
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	buf := make([]byte, 8)
+	if _, err := p.ReadI(buf, 1); !errors.Is(err, unix.EBADF) {
+		t.Errorf("ReadI after Close = %v, want EBADF", err)
+	}
+	if issued.Load() {
+		t.Error("ReadI issued a READI_FRAMES ioctl after Close")
+	}
+	// Recover routes its ioctls through the same guard, so it also fails closed.
+	if err := p.Recover(unix.ESTRPIPE); !errors.Is(err, unix.EBADF) {
+		t.Errorf("Recover after Close = %v, want EBADF-wrapping error", err)
+	}
+}
+
+// TestCloseConcurrent runs two Close calls at once: both must return nil and the
+// -race detector must stay quiet (exactly-once close via the closed flag).
+func TestCloseConcurrent(t *testing.T) {
+	fd := openDevNull(t)
+	p := newPCM(fd, func(int, uintptr, unsafe.Pointer) error { return nil })
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) { defer wg.Done(); errs[i] = p.Close() }(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Close[%d] = %v, want nil", i, err)
+		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -18,9 +19,34 @@ import (
 type ioctlFunc func(fd int, req uintptr, arg unsafe.Pointer) error
 
 // PCM is an open capture PCM device.
+//
+// The fd's lifetime is guarded because Close may run on a different goroutine to
+// unblock a parked ReadI (the documented unblock-a-parked-reader path). An
+// atomic on the fd alone would stop the data race but not the use-after-close:
+// ReadI could read the fd, be preempted, and issue its ioctl after Close had
+// already closed that fd and the number was reused elsewhere. Instead each ioctl
+// on the normal API paths registers as in-flight (acquire/release) and Close
+// waits for in-flight to drain before unix.Close, so the fd is never closed
+// under a live syscall. (Close's own DROP is the one ioctl outside the guard: it
+// runs on the closing goroutine before unix.Close, so it cannot overlap it
+// either.) A mutex held across the blocking READI_FRAMES ioctl is not an option:
+// Close could then never run to issue the DROP that unblocks the reader, so the
+// mutex is only ever held around the bookkeeping, never around a syscall.
 type PCM struct {
+	// fd is written once by newPCM before the *PCM is published and never
+	// mutated after, so plain reads are race-free; its lifetime (not its value)
+	// is what the guard below protects.
 	fd    int
 	ioctl ioctlFunc
+	// xferi is reused across ReadI calls so the per-read transfer descriptor
+	// never heap-allocates. ReadI is single-consumer (Stream.Read drives it),
+	// and Recover never touches this field, so reuse is race-free.
+	xferi Xferi
+
+	mu       sync.Mutex // guards closed and inflight; never held across a syscall
+	cond     sync.Cond  // L == &mu; Close waits on it until inflight drains to 0
+	closed   bool       // set once by the winning Close; blocks new acquires
+	inflight int        // ioctls currently between acquire and release
 }
 
 // Negotiated reports the configuration the hardware actually accepted. With no
@@ -69,7 +95,53 @@ func OpenPCM(card, device int) (*PCM, error) {
 	if err != nil {
 		return nil, &ioctlError{Op: "open " + path, Err: err}
 	}
-	return &PCM{fd: fd, ioctl: ioctl}, nil
+	return newPCM(fd, ioctl), nil
+}
+
+// newPCM builds a PCM and wires the condition variable to the mutex. It is the
+// single construction point (production and tests) so the sync.Cond is always
+// wired before the *PCM is published.
+func newPCM(fd int, ioctl ioctlFunc) *PCM {
+	p := &PCM{fd: fd, ioctl: ioctl}
+	p.cond.L = &p.mu
+	return p
+}
+
+// acquire registers an in-flight ioctl and returns the fd to use. It returns
+// unix.EBADF (which Stream.Read maps to ErrClosed) if the PCM is already closed,
+// so no ioctl is ever issued on a closed or about-to-be-closed fd. Pair every
+// successful acquire with a release.
+func (p *PCM) acquire() (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return -1, unix.EBADF
+	}
+	p.inflight++
+	return p.fd, nil
+}
+
+// release marks an in-flight ioctl done and wakes a Close waiting to drain.
+func (p *PCM) release() {
+	p.mu.Lock()
+	p.inflight--
+	if p.inflight == 0 && p.closed {
+		p.cond.Broadcast()
+	}
+	p.mu.Unlock()
+}
+
+// guardedIoctl runs a control ioctl inside the in-flight guard so Close cannot
+// close the fd under it. The ioctl runs outside the mutex. ReadI does not use
+// this helper: it must keep buf alive across the syscall (runtime.KeepAlive) and
+// read p.xferi.Result back afterward, so it inlines the same acquire/release.
+func (p *PCM) guardedIoctl(req uintptr, arg unsafe.Pointer) error {
+	fd, err := p.acquire()
+	if err != nil {
+		return err
+	}
+	defer p.release()
+	return p.ioctl(fd, req, arg)
 }
 
 // Negotiate configures the hardware for the requested format via HW_REFINE then
@@ -143,7 +215,7 @@ func (p *PCM) setSwParams(n Negotiated) error {
 		StopThreshold:  ^uint64(0),
 		Boundary:       boundary(uint64(n.BufferFrames)),
 	}
-	if err := p.ioctl(p.fd, iocSwParams, unsafe.Pointer(&sw)); err != nil {
+	if err := p.guardedIoctl(iocSwParams, unsafe.Pointer(&sw)); err != nil {
 		return &ioctlError{Op: "SW_PARAMS", Err: err}
 	}
 	return nil
@@ -156,7 +228,7 @@ func (p *PCM) Prepare() error { return p.control(iocPrepare, "PREPARE") }
 func (p *PCM) Start() error { return p.control(iocStart, "START") }
 
 func (p *PCM) control(req uintptr, op string) error {
-	if err := p.ioctl(p.fd, req, nil); err != nil {
+	if err := p.guardedIoctl(req, nil); err != nil {
 		return &ioctlError{Op: op, Err: err}
 	}
 	return nil
@@ -170,19 +242,26 @@ func (p *PCM) ReadI(buf []byte, frames int) (int, error) {
 	if frames <= 0 || len(buf) == 0 {
 		return 0, nil
 	}
-	x := Xferi{
-		Buf:    unsafe.Pointer(&buf[0]),
-		Frames: uint64(frames),
+	// Reuse the preallocated descriptor; Result is overwritten by the ioctl.
+	p.xferi.Buf = unsafe.Pointer(&buf[0])
+	p.xferi.Frames = uint64(frames)
+	// Register as in-flight so Close cannot close the fd underneath the syscall.
+	// The blocking ioctl runs outside the mutex; a concurrent Close unblocks it
+	// with DROP, then waits for release below before it closes the fd.
+	fd, err := p.acquire()
+	if err != nil {
+		return 0, err
 	}
-	err := p.ioctl(p.fd, iocReadIFrames, unsafe.Pointer(&x))
+	defer p.release()
+	err = p.ioctl(fd, iocReadIFrames, unsafe.Pointer(&p.xferi))
 	runtime.KeepAlive(buf)
 	if err != nil {
 		return 0, err
 	}
-	if x.Result < 0 {
-		return 0, unix.Errno(-x.Result)
+	if p.xferi.Result < 0 {
+		return 0, unix.Errno(-p.xferi.Result)
 	}
-	return int(x.Result), nil
+	return int(p.xferi.Result), nil
 }
 
 // Recover handles a transfer error. An overrun (EPIPE) is cleared by
@@ -198,7 +277,7 @@ func (p *PCM) Recover(err error) error {
 		return p.Start()
 	case errors.Is(err, unix.ESTRPIPE):
 		for {
-			e := p.ioctl(p.fd, iocResume, nil)
+			e := p.guardedIoctl(iocResume, nil)
 			if e == nil || errors.Is(e, unix.ENOSYS) {
 				break // resumed, or driver has no RESUME: fall through to prepare
 			}
@@ -217,28 +296,48 @@ func (p *PCM) Recover(err error) error {
 	}
 }
 
-// Close stops the stream and closes the fd. It is idempotent. The best-effort
-// DROP unblocks any reader currently parked in READI_FRAMES so it returns and
-// the read goroutine can exit.
+// Close stops the stream and closes the fd. It is idempotent, and may be called
+// from a different goroutine than the reader to unblock a parked ReadI. To avoid
+// closing the fd out from under a live syscall (which would let the reused fd
+// number take an ALSA ioctl meant for a since-closed device), it marks the PCM
+// closed, issues a best-effort DROP to wake a reader parked in READI_FRAMES,
+// waits for every in-flight ioctl to return, and only then closes the fd. Close
+// therefore blocks until an in-flight ReadI returns (DROP wakes it promptly).
 func (p *PCM) Close() error {
-	if p.fd < 0 {
+	// Claim the close exactly once and stop new ioctls from starting.
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
 		return nil
 	}
-	_ = p.ioctl(p.fd, iocDrop, nil) // best effort: unblock a parked reader
-	err := unix.Close(p.fd)
-	p.fd = -1
-	return err
+	p.closed = true
+	fd := p.fd
+	p.mu.Unlock()
+
+	// Wake a reader parked in READI_FRAMES. Safe without the mutex: fd is still
+	// open (only this Close closes it, below) and only this goroutine got here.
+	_ = p.ioctl(fd, iocDrop, nil) // best effort
+
+	// Wait for in-flight ioctls to finish, then close the fd. closed == true
+	// guarantees no new acquire succeeds, so inflight cannot rise again.
+	p.mu.Lock()
+	for p.inflight > 0 {
+		p.cond.Wait()
+	}
+	p.mu.Unlock()
+
+	return unix.Close(fd)
 }
 
 func (p *PCM) refine(hw *HwParams) error {
-	if err := p.ioctl(p.fd, iocHwRefine, unsafe.Pointer(hw)); err != nil {
+	if err := p.guardedIoctl(iocHwRefine, unsafe.Pointer(hw)); err != nil {
 		return &ioctlError{Op: "HW_REFINE", Err: err}
 	}
 	return nil
 }
 
 func (p *PCM) hwParams(hw *HwParams) error {
-	if err := p.ioctl(p.fd, iocHwParams, unsafe.Pointer(hw)); err != nil {
+	if err := p.guardedIoctl(iocHwParams, unsafe.Pointer(hw)); err != nil {
 		return &ioctlError{Op: "HW_PARAMS", Err: err}
 	}
 	return nil

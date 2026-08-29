@@ -102,7 +102,14 @@ func (s *Stream) Start() error {
 	if s.closed.Load() {
 		return ErrClosed
 	}
-	return s.pcm.Start()
+	if err := s.pcm.Start(); err != nil {
+		// A concurrent Close races the START ioctl to EBADF; report the close.
+		if s.closed.Load() || errors.Is(err, unix.EBADF) {
+			return ErrClosed
+		}
+		return err
+	}
+	return nil
 }
 
 // Read fills buf with whole interleaved frames and returns the number of frames
@@ -122,10 +129,20 @@ func (s *Stream) Read(buf []byte) (int, error) {
 		if err == nil {
 			return n, nil
 		}
+		// A concurrent Close surfaces two distinct errnos: EBADF when acquire
+		// short-circuits a closed PCM, or the kernel's EBADFD (a different errno)
+		// when Close's DROP moved the stream to SETUP under a parked read. Close
+		// sets s.closed before pcm.Close, so the s.closed check catches the
+		// EBADFD case that errors.Is(EBADF) does not.
 		if s.closed.Load() || errors.Is(err, unix.EBADF) {
 			return 0, ErrClosed
 		}
 		if rerr := s.pcm.Recover(err); rerr != nil {
+			// A concurrent Close can fail Recover's own ioctls with EBADF;
+			// surface that as a clean close rather than a raw driver error.
+			if s.closed.Load() || errors.Is(rerr, unix.EBADF) {
+				return 0, ErrClosed
+			}
 			return 0, rerr // unrecoverable: Recover returns the error unchanged
 		}
 		s.xruns.Add(1)
@@ -136,7 +153,8 @@ func (s *Stream) Read(buf []byte) (int, error) {
 func (s *Stream) Xruns() uint64 { return s.xruns.Load() }
 
 // Close stops and closes the stream. It is idempotent and unblocks a Read
-// currently parked in the driver.
+// currently parked in the driver. It blocks until that in-flight Read has
+// returned, so the device fd is never closed out from under a live read.
 func (s *Stream) Close() error {
 	if s.closed.Swap(true) {
 		return nil
