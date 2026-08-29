@@ -38,6 +38,8 @@ type Client struct {
 	mu       sync.Mutex // serializes buffer access against Close teardown
 	closed   atomic.Bool
 	readerWG sync.WaitGroup // tracks an in-flight Read so Close waits before closing event handles
+
+	diag captureDiag // device-position evidence, dumped by Close under GAC_WASAPI_DIAG (updated under mu)
 }
 
 // Open resolves an endpoint (id, or "" / "default" for the default capture
@@ -251,6 +253,7 @@ func (c *Client) fill(buf []byte) (frames int, discontinuity bool, err error) {
 			c.releaseBuffer(0)
 			break
 		}
+		c.diag.record(devPos, numFrames, flags)
 		if flags&bufferFlagsDataDiscontinuity != 0 {
 			disc = true
 		}
@@ -319,6 +322,7 @@ func (c *Client) Close() error {
 	if c.closeEvent != 0 {
 		_ = windows.CloseHandle(c.closeEvent)
 	}
+	c.diag.dump(c.neg.Rate)
 	return nil
 }
 

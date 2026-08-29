@@ -81,7 +81,8 @@ func record(device string, rate, channels int, format string, dur time.Duration,
 		return err
 	}
 	buf := make([]byte, n.PeriodFrames*frameBytes)
-	deadline := time.Now().Add(dur)
+	start := time.Now()
+	deadline := start.Add(dur)
 	var dataBytes int64
 	for time.Now().Before(deadline) {
 		frames, rerr := s.Read(buf)
@@ -94,10 +95,19 @@ func record(device string, rate, channels int, format string, dur time.Duration,
 		}
 		dataBytes += int64(wb)
 	}
+	wall := time.Since(start)
 	if err := patchWAVSizes(w, dataBytes); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "wrote %d bytes to %s, xruns: %d\n", dataBytes, out, s.Xruns())
+	// Real-time capture must produce audio duration ~= wall time. A ratio far
+	// from 1.0 means Stream.Read mis-accounted frames (over- or under-delivery).
+	if frameBytes > 0 && wall > 0 {
+		totalFrames := dataBytes / int64(frameBytes)
+		audioSec := float64(totalFrames) / float64(n.Rate)
+		fmt.Fprintf(os.Stderr, "timing: %d frames = %.3fs audio in %.3fs wall (ratio %.3f; 1.000 == real-time)\n",
+			totalFrames, audioSec, wall.Seconds(), audioSec/wall.Seconds())
+	}
 	return nil
 }
 
