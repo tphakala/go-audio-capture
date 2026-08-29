@@ -24,12 +24,14 @@ type ioctlFunc func(fd int, req uintptr, arg unsafe.Pointer) error
 // unblock a parked ReadI (the documented unblock-a-parked-reader path). An
 // atomic on the fd alone would stop the data race but not the use-after-close:
 // ReadI could read the fd, be preempted, and issue its ioctl after Close had
-// already closed that fd and the number was reused elsewhere. Instead every
-// ioctl registers as in-flight (acquire/release) and Close waits for in-flight
-// to drain before unix.Close, so the fd is never closed under a live syscall. A
-// mutex held across the blocking READI_FRAMES ioctl is not an option: Close
-// could then never run to issue the DROP that unblocks the reader, so the mutex
-// is only ever held around the bookkeeping, never around a syscall.
+// already closed that fd and the number was reused elsewhere. Instead each ioctl
+// on the normal API paths registers as in-flight (acquire/release) and Close
+// waits for in-flight to drain before unix.Close, so the fd is never closed
+// under a live syscall. (Close's own DROP is the one ioctl outside the guard: it
+// runs on the closing goroutine before unix.Close, so it cannot overlap it
+// either.) A mutex held across the blocking READI_FRAMES ioctl is not an option:
+// Close could then never run to issue the DROP that unblocks the reader, so the
+// mutex is only ever held around the bookkeeping, never around a syscall.
 type PCM struct {
 	// fd is written once by newPCM before the *PCM is published and never
 	// mutated after, so plain reads are race-free; its lifetime (not its value)
@@ -129,17 +131,17 @@ func (p *PCM) release() {
 	p.mu.Unlock()
 }
 
-// guardedIoctl runs a non-blocking control ioctl inside the in-flight guard. The
-// ioctl itself runs outside the mutex. ReadI does not use this helper: it needs
-// the raw errno and a runtime.KeepAlive spanning its (blocking) syscall.
+// guardedIoctl runs a control ioctl inside the in-flight guard so Close cannot
+// close the fd under it. The ioctl runs outside the mutex. ReadI does not use
+// this helper: it must keep buf alive across the syscall (runtime.KeepAlive) and
+// read p.xferi.Result back afterward, so it inlines the same acquire/release.
 func (p *PCM) guardedIoctl(req uintptr, arg unsafe.Pointer) error {
 	fd, err := p.acquire()
 	if err != nil {
 		return err
 	}
-	err = p.ioctl(fd, req, arg)
-	p.release()
-	return err
+	defer p.release()
+	return p.ioctl(fd, req, arg)
 }
 
 // Negotiate configures the hardware for the requested format via HW_REFINE then
@@ -250,8 +252,8 @@ func (p *PCM) ReadI(buf []byte, frames int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	defer p.release()
 	err = p.ioctl(fd, iocReadIFrames, unsafe.Pointer(&p.xferi))
-	p.release()
 	runtime.KeepAlive(buf)
 	if err != nil {
 		return 0, err

@@ -252,11 +252,13 @@ func TestCloseWaitsForInFlightReadI(t *testing.T) {
 // deadlock here. The fake blocks the read until it observes the DROP.
 func TestCloseUnblocksParkedReadI(t *testing.T) {
 	fd := openDevNull(t)
+	entered := make(chan struct{})
 	drop := make(chan struct{})
 	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
 		switch req {
 		case iocReadIFrames:
-			<-drop // park until Close issues DROP
+			close(entered) // the read has acquired the guard and is now parked
+			<-drop         // park inside the ioctl until Close issues DROP
 			return unix.EBADFD
 		case iocDrop:
 			close(drop)
@@ -271,6 +273,12 @@ func TestCloseUnblocksParkedReadI(t *testing.T) {
 		_, _ = p.ReadI(buf, 1)
 		close(readDone)
 	}()
+
+	// Do not start Close until the reader is genuinely parked inside the ioctl;
+	// otherwise Close could win the mutex first and the reader would never park,
+	// making this a vacuous test of the DROP-unblocks-a-parked-reader path (and
+	// of the deadlock a lock-across-the-syscall design would cause).
+	<-entered
 
 	done := make(chan struct{})
 	go func() {

@@ -129,6 +129,11 @@ func (s *Stream) Read(buf []byte) (int, error) {
 		if err == nil {
 			return n, nil
 		}
+		// A concurrent Close surfaces two distinct errnos: EBADF when acquire
+		// short-circuits a closed PCM, or the kernel's EBADFD (a different errno)
+		// when Close's DROP moved the stream to SETUP under a parked read. Close
+		// sets s.closed before pcm.Close, so the s.closed check catches the
+		// EBADFD case that errors.Is(EBADF) does not.
 		if s.closed.Load() || errors.Is(err, unix.EBADF) {
 			return 0, ErrClosed
 		}
