@@ -1,10 +1,12 @@
-//go:build linux
+//go:build linux || windows
 
-// Command gac-rec is a spike/debug tool: it records a few seconds of audio
-// from an ALSA capture device through go-audio-capture and writes a WAV file,
-// printing the negotiated parameters and the xrun count on exit. It exists to
-// validate capture on real hardware (including high-rate ultrasonic mics), not
-// as a supported end-user tool.
+// Command gac-rec is a spike/debug tool: it records a few seconds of audio from
+// a capture device through go-audio-capture and writes a WAV file, printing the
+// negotiated parameters and the xrun count on exit. It exists to validate
+// capture on real hardware (including high-rate ultrasonic mics), not as a
+// supported end-user tool. It is cross-platform: the ALSA (Linux) and WASAPI
+// (Windows) backends are selected by build tag, and only the default device
+// string differs per platform (see defaultDevice).
 package main
 
 import (
@@ -18,7 +20,7 @@ import (
 )
 
 func main() {
-	device := flag.String("d", "hw:1,0", "capture device (hw:card,device)")
+	device := flag.String("d", defaultDevice, "capture device id (Linux: hw:card,device; Windows: WASAPI endpoint id, or empty/\"default\")")
 	rate := flag.Int("r", 48000, "sample rate in Hz")
 	channels := flag.Int("c", 1, "channel count")
 	format := flag.String("f", "s16", "sample format: s16 or s32")
@@ -79,7 +81,8 @@ func record(device string, rate, channels int, format string, dur time.Duration,
 		return err
 	}
 	buf := make([]byte, n.PeriodFrames*frameBytes)
-	deadline := time.Now().Add(dur)
+	start := time.Now()
+	deadline := start.Add(dur)
 	var dataBytes int64
 	for time.Now().Before(deadline) {
 		frames, rerr := s.Read(buf)
@@ -92,10 +95,19 @@ func record(device string, rate, channels int, format string, dur time.Duration,
 		}
 		dataBytes += int64(wb)
 	}
+	wall := time.Since(start)
 	if err := patchWAVSizes(w, dataBytes); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "wrote %d bytes to %s, xruns: %d\n", dataBytes, out, s.Xruns())
+	// Real-time capture must produce audio duration ~= wall time. A ratio far
+	// from 1.0 means Stream.Read mis-accounted frames (over- or under-delivery).
+	if frameBytes > 0 && wall > 0 {
+		totalFrames := dataBytes / int64(frameBytes)
+		audioSec := float64(totalFrames) / float64(n.Rate)
+		fmt.Fprintf(os.Stderr, "timing: %d frames = %.3fs audio in %.3fs wall (ratio %.3f; 1.000 == real-time)\n",
+			totalFrames, audioSec, wall.Seconds(), audioSec/wall.Seconds())
+	}
 	return nil
 }
 

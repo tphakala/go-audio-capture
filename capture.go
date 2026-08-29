@@ -36,9 +36,10 @@ func (f Format) String() string {
 	}
 }
 
-// DeviceInfo identifies a capture-capable PCM device. ID is the stable,
-// human-usable "hw:card,device" string (never a hex-encoded token) that Config
-// and the ALSA tooling accept directly.
+// DeviceInfo identifies a capture-capable PCM device. ID is a stable,
+// platform-specific identifier that Config.Device accepts directly: on Linux the
+// human-usable "hw:card,device" string (never a hex-encoded token), on Windows
+// the WASAPI endpoint-id string. Card and Device are populated on Linux only.
 type DeviceInfo struct {
 	ID     string
 	Card   int
@@ -48,12 +49,14 @@ type DeviceInfo struct {
 
 // Config requests a capture configuration. Rate is honored exactly or Open
 // fails with *BadRateError: there is no silent resampling. PeriodFrames and
-// Periods default to a 20 ms period (Rate/50) and 4 periods when left zero.
+// Periods default to a 20 ms period (Rate/50) and 4 periods when left zero on
+// Linux; on Windows (WASAPI exclusive mode) the endpoint dictates the buffer
+// period, so both fields are ignored and Negotiated reports the actual period.
 type Config struct {
-	Device       string // "hw:card,device", e.g. "hw:1,0"
+	Device       string // Linux "hw:card,device" (e.g. "hw:1,0"); Windows WASAPI endpoint id, or ""/"default"
 	Rate         int    // requested sample rate in Hz
 	Channels     int    // 1 or 2
 	Format       Format
-	PeriodFrames int // frames per period; 0 => Rate/50 (20 ms)
-	Periods      int // periods per buffer; 0 => 4
+	PeriodFrames int // frames per period; Linux: 0 => Rate/50 (20 ms); ignored on Windows
+	Periods      int // periods per buffer; Linux: 0 => 4; ignored on Windows
 }
