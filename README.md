@@ -1,5 +1,14 @@
 # go-audio-capture
 
+[![CI](https://github.com/tphakala/go-audio-capture/actions/workflows/ci.yml/badge.svg)](https://github.com/tphakala/go-audio-capture/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/tphakala/go-audio-capture.svg)](https://pkg.go.dev/github.com/tphakala/go-audio-capture)
+[![codecov](https://codecov.io/gh/tphakala/go-audio-capture/branch/main/graph/badge.svg)](https://codecov.io/gh/tphakala/go-audio-capture)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/tphakala/go-audio-capture)](go.mod)
+[![Latest tag](https://img.shields.io/github/v/tag/tphakala/go-audio-capture?sort=semver&label=release)](https://github.com/tphakala/go-audio-capture/tags)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/tphakala/go-audio-capture/badge)](https://scorecard.dev/viewer/?uri=github.com/tphakala/go-audio-capture)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Sponsor](https://img.shields.io/github/sponsors/tphakala?logo=githubsponsors&color=ea4aaa&label=Sponsor)](https://github.com/sponsors/tphakala)
+
 Pure Go, cgo-free audio capture for Linux, Windows, and macOS.
 
 Capture only: device enumeration, honest format negotiation, and PCM delivery through a blocking pull API. Planned replacement for the malgo/miniaudio capture path in BirdNET-Go.

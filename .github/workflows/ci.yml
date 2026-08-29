@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
+
+env:
+  GO_VERSION: '1.27'
+  # Pinned to match the local toolchain so the linter version is identical
+  # across developer machines and CI.
+  GOLANGCI_LINT_VERSION: 'v2.13.2'
 
 permissions:
   contents: read
@@ -12,35 +19,61 @@ permissions:
 # A Windows/macOS matrix is added when the WASAPI and CoreAudio backends land.
 jobs:
   test:
+    name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
         with:
-          persist-credentials: false
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.27.x'
+          go-version: ${{ env.GO_VERSION }}
+
       - name: Build (CGO disabled)
         run: CGO_ENABLED=0 go build ./...
+
       - name: Build (linux/arm64, CGO disabled)
         run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./...
-      - name: Vet (amd64 and arm64)
-        run: |
-          GOARCH=amd64 go vet ./...
-          GOARCH=arm64 go vet ./...
-      - name: Test (race)
-        run: go test -race ./...
+
+      - name: Test with coverage
+        run: go test -race -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+
+  vet:
+    name: Vet
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Run go vet
+        env:
+          GOARCH: ${{ matrix.goarch }}
+        run: go vet ./...
 
   lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
         with:
-          persist-credentials: false
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.27.x'
-          cache-dependency-path: go.sum
+          go-version: ${{ env.GO_VERSION }}
       - name: gofmt
         run: |
           files=$(gofmt -l .)
@@ -52,4 +85,4 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
