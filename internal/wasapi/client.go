@@ -35,11 +35,30 @@ type Client struct {
 	neg   Negotiated
 	carry []byte // whole-frame overflow from a packet larger than the caller's buffer
 
+	nextPos uint64 // expected devicePosition of the next packet (frames), for overlap/gap detection
+	havePos bool   // whether nextPos has been seeded by the first packet
+
+	// getPacketFn/releaseFn are the IAudioCaptureClient seam fill() drives;
+	// production wires the real GetBuffer/ReleaseBuffer, tests inject fakes.
+	getPacketFn func() (capturePacket, error)
+	releaseFn   func(frames uint32)
+
 	mu       sync.Mutex // serializes buffer access against Close teardown
 	closed   atomic.Bool
 	readerWG sync.WaitGroup // tracks an in-flight Read so Close waits before closing event handles
 
 	diag captureDiag // device-position evidence, dumped by Close under GAC_WASAPI_DIAG (updated under mu)
+}
+
+// capturePacket is one IAudioCaptureClient::GetBuffer result. data aliases the
+// WASAPI buffer (valid until releaseFn) and is nil for a SILENT or empty packet;
+// empty reports AUDCLNT_S_BUFFER_EMPTY (no packet was returned).
+type capturePacket struct {
+	data   []byte
+	frames uint32
+	flags  uint32
+	devPos uint64
+	empty  bool
 }
 
 // Open resolves an endpoint (id, or "" / "default" for the default capture
@@ -61,7 +80,10 @@ func Open(id string) (*Client, error) {
 		release(dev)
 		return nil, err
 	}
-	return &Client{device: dev, client: client}, nil
+	c := &Client{device: dev, client: client}
+	c.getPacketFn = c.getPacket
+	c.releaseFn = c.releaseBuffer
+	return c, nil
 }
 
 // Negotiate configures exclusive-mode capture at the exact rate, channel count,
@@ -81,7 +103,7 @@ func (c *Client) Negotiate(rate, channels, bits int) (Negotiated, error) {
 		return Negotiated{}, &hresultError{Op: "IsFormatSupported", HR: hr}
 	}
 
-	dur := c.minDevicePeriod()
+	dur := c.capturePeriod()
 	hr := c.initialize(format, dur)
 	if hr == hrBufferSizeNotAligned {
 		// Documented retry: re-Activate a fresh client and re-Initialize with a
@@ -219,66 +241,110 @@ func (c *Client) Read(buf []byte) (frames int, discontinuity bool, err error) {
 	}
 }
 
-// fill drains the carry-over buffer and then any ready WASAPI packets into buf,
-// up to buf's whole-frame capacity, stashing packet overflow into carry. It does
-// not block. The caller holds c.mu.
+// fill serves any carry-over, then reads exactly ONE GetBuffer packet into buf.
+// It does not block and the caller holds c.mu.
+//
+// Exclusive event-driven capture presents at most one buffer per audio-ready
+// event, so fill reads a single packet rather than looping until
+// AUDCLNT_S_BUFFER_EMPTY: that shared-mode drain idiom makes some drivers
+// (notably Creative's) re-present an already-delivered buffer, which the loop
+// then delivered twice (a backward devicePosition jump). fill instead uses the
+// packet's devicePosition as ground truth: a packet behind the expected position
+// is an overlap whose already-delivered prefix is skipped, and a packet ahead is
+// a gap (the device dropped frames on an overrun) reported as a discontinuity.
+// This keeps delivered frames equal to the device's own advance on every driver.
 func (c *Client) fill(buf []byte) (frames int, discontinuity bool, err error) {
 	frameBytes := c.neg.blockAlign()
 	whole := (len(buf) / frameBytes) * frameBytes
 	n := 0
-	disc := false
 
 	if len(c.carry) > 0 {
 		m := copy(buf[:whole], c.carry)
 		c.carry = c.carry[m:]
 		n += m
+		if n == whole {
+			return n / frameBytes, false, nil
+		}
 	}
-	for n < whole {
-		var pData unsafe.Pointer
-		var numFrames, flags uint32
-		var devPos, qpcPos uint64
-		r, _, _ := syscall.SyscallN(methodAddr(c.capture, mCaptureGetBuffer),
-			uintptr(c.capture),
-			uintptr(unsafe.Pointer(&pData)), uintptr(unsafe.Pointer(&numFrames)),
-			uintptr(unsafe.Pointer(&flags)),
-			uintptr(unsafe.Pointer(&devPos)), uintptr(unsafe.Pointer(&qpcPos)))
-		hr := hresult(uint32(r))
-		if hr == hrBufferEmpty {
-			break
+
+	pkt, err := c.getPacketFn()
+	if err != nil {
+		return n / frameBytes, false, err
+	}
+	if pkt.empty || pkt.frames == 0 {
+		if !pkt.empty {
+			c.releaseFn(0)
 		}
-		if hr.failed() {
-			return n / frameBytes, disc, &hresultError{Op: "IAudioCaptureClient::GetBuffer", HR: hr}
-		}
-		if numFrames == 0 {
-			c.releaseBuffer(0)
-			break
-		}
-		c.diag.record(devPos, numFrames, flags)
-		if flags&bufferFlagsDataDiscontinuity != 0 {
+		return n / frameBytes, false, nil
+	}
+	c.diag.record(pkt.devPos, pkt.frames, pkt.flags)
+
+	disc := pkt.flags&bufferFlagsDataDiscontinuity != 0
+	skip := uint32(0)
+	if c.havePos {
+		switch {
+		case pkt.devPos < c.nextPos: // overlap: skip frames already delivered
+			if over := c.nextPos - pkt.devPos; over >= uint64(pkt.frames) {
+				skip = pkt.frames // whole packet already delivered
+			} else {
+				skip = uint32(over)
+			}
+		case pkt.devPos > c.nextPos: // gap: device dropped frames (overrun)
 			disc = true
 		}
-		pktBytes := int(numFrames) * frameBytes
-		var copied int
-		if flags&bufferFlagsSilent != 0 {
-			// SILENT: the packet memory is undefined; deliver zeros. Clear the
-			// destination in place rather than allocating a scratch zero slice
-			// on this per-packet drain path.
-			copied = min(pktBytes, whole-n)
+	}
+	c.nextPos = pkt.devPos + uint64(pkt.frames)
+	c.havePos = true
+
+	if use := pkt.frames - skip; use > 0 {
+		off := int(skip) * frameBytes
+		pktBytes := int(use) * frameBytes
+		copied := min(pktBytes, whole-n)
+		if pkt.flags&bufferFlagsSilent != 0 || pkt.data == nil {
+			// SILENT: packet memory is undefined; deliver zeros.
 			clear(buf[n : n+copied])
-			if copied < pktBytes {
-				c.carry = append(c.carry, make([]byte, pktBytes-copied)...)
-			}
 		} else {
-			src := unsafe.Slice((*byte)(pData), pktBytes)
-			copied = copy(buf[n:whole], src)
-			if copied < pktBytes {
-				c.carry = append(c.carry, src[copied:]...)
+			copy(buf[n:n+copied], pkt.data[off:off+pktBytes])
+		}
+		if copied < pktBytes {
+			// Overflow beyond the caller's buffer: keep the remainder for the
+			// next Read (SILENT contributes zeros).
+			if pkt.flags&bufferFlagsSilent != 0 || pkt.data == nil {
+				c.carry = append(c.carry, make([]byte, pktBytes-copied)...)
+			} else {
+				c.carry = append(c.carry, pkt.data[off+copied:off+pktBytes]...)
 			}
 		}
 		n += copied
-		c.releaseBuffer(numFrames)
 	}
+	c.releaseFn(pkt.frames)
 	return n / frameBytes, disc, nil
+}
+
+// getPacket calls IAudioCaptureClient::GetBuffer once. It returns an empty
+// packet for AUDCLNT_S_BUFFER_EMPTY. The returned data aliases the WASAPI buffer
+// and stays valid until releaseBuffer; it is nil for SILENT packets.
+func (c *Client) getPacket() (capturePacket, error) {
+	var pData unsafe.Pointer
+	var numFrames, flags uint32
+	var devPos, qpcPos uint64
+	r, _, _ := syscall.SyscallN(methodAddr(c.capture, mCaptureGetBuffer),
+		uintptr(c.capture),
+		uintptr(unsafe.Pointer(&pData)), uintptr(unsafe.Pointer(&numFrames)),
+		uintptr(unsafe.Pointer(&flags)),
+		uintptr(unsafe.Pointer(&devPos)), uintptr(unsafe.Pointer(&qpcPos)))
+	hr := hresult(uint32(r))
+	if hr == hrBufferEmpty {
+		return capturePacket{empty: true}, nil
+	}
+	if hr.failed() {
+		return capturePacket{}, &hresultError{Op: "IAudioCaptureClient::GetBuffer", HR: hr}
+	}
+	var data []byte
+	if numFrames > 0 && flags&bufferFlagsSilent == 0 && pData != nil {
+		data = unsafe.Slice((*byte)(pData), int(numFrames)*c.neg.blockAlign())
+	}
+	return capturePacket{data: data, frames: numFrames, flags: flags, devPos: devPos}, nil
 }
 
 // Negotiated returns the accepted configuration.
@@ -339,11 +405,19 @@ func (c *Client) isFormatSupported(f *waveFormatExtensible) hresult {
 	return hresult(uint32(r))
 }
 
-func (c *Client) minDevicePeriod() int64 {
+// capturePeriod returns the endpoint's DEFAULT device period (100-ns units), not
+// its minimum. The minimum period (e.g. 3 ms) is too tight for the single-
+// GetBuffer-per-event capture loop at high sample rates: the loop cannot service
+// each buffer before the next arrives, so the device overruns and drops frames
+// (seen as ~60% loss at 192 kHz). The default period (~10 ms) gives the read
+// loop enough headroom to keep up, trading a few ms of latency for gap-free
+// capture. The buffer-size-not-aligned retry still applies if the endpoint
+// requires an aligned period.
+func (c *Client) capturePeriod() int64 {
 	var defPer, minPer int64
 	_, _, _ = syscall.SyscallN(methodAddr(c.client, mClientGetDevicePeriod),
 		uintptr(c.client), uintptr(unsafe.Pointer(&defPer)), uintptr(unsafe.Pointer(&minPer)))
-	return minPer
+	return defPer
 }
 
 func (c *Client) initialize(f *waveFormatExtensible, dur int64) hresult {
