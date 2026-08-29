@@ -1,0 +1,35 @@
+# Build artifacts
+/bin/
+*.exe
+*.test
+*.out
+
+# Coverage and profiling
+coverage.out
+coverage.txt
+*.cov
+*.prof
+*.pprof
+
+# Planning and design docs are private (tracked outside this repo, in the
+# private tracker); they must never reach a published GitHub repository.
+/docs/
+
+# Raw audio captures and recordings from local/hardware validation are private
+# (may contain LAN details) and never committed. Scrubbed fixtures derived from
+# them are committed under testdata/ instead.
+/testdata/captures/
+*.wav
+*.raw
+
+# Editor and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+.serena/
+.claude/
+.codegraph/
+
+# Orchestration scratch (session-local, never committed)
+/.superpowers/

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Phase 1 is a Linux-only ALSA capture backend, so CI runs on Linux only.
+# A Windows/macOS matrix is added when the WASAPI and CoreAudio backends land.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+      - name: Build (CGO disabled)
+        run: CGO_ENABLED=0 go build ./...
+      - name: Build (linux/arm64, CGO disabled)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./...
+      - name: Vet (amd64 and arm64)
+        run: |
+          GOARCH=amd64 go vet ./...
+          GOARCH=arm64 go vet ./...
+      - name: Test (race)
+        run: go test -race ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          cache-dependency-path: go.sum
+      - name: gofmt
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$files"
+            exit 1
+          fi
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
