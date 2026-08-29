@@ -15,7 +15,7 @@ func TestStreamReadAllocFree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	buf := make([]byte, 256*s.frameBytes)
 	allocs := testing.AllocsPerRun(1000, func() {
