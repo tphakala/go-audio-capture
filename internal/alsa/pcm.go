@@ -125,6 +125,11 @@ func (p *PCM) Negotiate(rate, channels int, format uint32, periodFrames, periods
 	if err := p.setSwParams(n); err != nil {
 		return Negotiated{}, err
 	}
+	// Move the stream from SETUP to PREPARED so a later Start (SETUP -> START
+	// is EBADFD) is valid: Open leaves the device prepared but not running.
+	if err := p.Prepare(); err != nil {
+		return Negotiated{}, err
+	}
 	return n, nil
 }
 
