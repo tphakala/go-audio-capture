@@ -51,6 +51,7 @@ func TestParseDeviceID(t *testing.T) {
 // hardware.
 type fakePCM struct {
 	readFn    func() (int, error)
+	recoverFn func(error) error // overrides Recover when set
 	recovered int
 	block     chan struct{} // closed by Close to unblock a parked ReadI
 }
@@ -64,6 +65,9 @@ func (f *fakePCM) Negotiate(rate, channels int, format uint32, periodFrames, per
 func (f *fakePCM) Start() error                       { return nil }
 func (f *fakePCM) ReadI(_ []byte, _ int) (int, error) { return f.readFn() }
 func (f *fakePCM) Recover(err error) error {
+	if f.recoverFn != nil {
+		return f.recoverFn(err)
+	}
 	if errors.Is(err, unix.EPIPE) {
 		f.recovered++
 		return nil
@@ -165,6 +169,32 @@ func TestReadAfterCloseReturnsErrClosed(t *testing.T) {
 		t.Errorf("Read after Close = %v, want ErrClosed", err)
 	}
 }
+
+// TestReadMapsRecoverEBADFToErrClosed covers the path where a concurrent Close
+// makes Recover's own ioctls fail with EBADF: Read must report ErrClosed rather
+// than leaking the raw driver error.
+func TestReadMapsRecoverEBADFToErrClosed(t *testing.T) {
+	fp := &fakePCM{
+		readFn:    func() (int, error) { return 0, unix.ESTRPIPE }, // triggers Recover
+		recoverFn: func(error) error { return &recoverErr{unix.EBADF} },
+	}
+	defer swapOpenPCM(fp)()
+	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatS16LE})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if _, err := s.Read(make([]byte, 96)); !errors.Is(err, ErrClosed) {
+		t.Errorf("Read with Recover EBADF = %v, want ErrClosed", err)
+	}
+}
+
+// recoverErr wraps an errno the way alsa's ioctlError does, so errors.Is unwraps
+// to the underlying errno.
+type recoverErr struct{ err error }
+
+func (e *recoverErr) Error() string { return "recover: " + e.err.Error() }
+func (e *recoverErr) Unwrap() error { return e.err }
 
 func TestOpenRejectsBadConfig(t *testing.T) {
 	defer swapOpenPCM(&fakePCM{readFn: func() (int, error) { return 0, nil }})()
