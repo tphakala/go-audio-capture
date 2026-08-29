@@ -76,13 +76,13 @@ Validated against the `snd-aloop` loopback (the same kernel ioctl path as a phys
 
 ## Phase 2: Windows WASAPI
 
-The Windows backend talks to WASAPI through hand-rolled COM over `golang.org/x/sys/windows` (no cgo, no third-party COM or audio dependency), the Windows analog of the ALSA backend. It captures in **exclusive mode only** (`AUDCLNT_SHAREMODE_EXCLUSIVE`), the WASAPI equivalent of ALSA `hw:` access: the format is negotiated directly with the endpoint. Shared mode is deliberately unsupported, because the OS mixer resamples to the engine mix rate and converts the sample format behind the caller's back — the same silent conversion the library exists to avoid. `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` is never used.
+The Windows backend talks to WASAPI through hand-rolled COM over `golang.org/x/sys/windows` (no cgo, no third-party COM or audio dependency), the Windows analog of the ALSA backend. It captures in **exclusive mode only** (`AUDCLNT_SHAREMODE_EXCLUSIVE`), the WASAPI equivalent of ALSA `hw:` access: the format is negotiated directly with the endpoint. Shared mode is deliberately unsupported, because the OS mixer resamples to the engine mix rate and converts the sample format behind the caller's back, the same silent conversion the library exists to avoid. `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` is never used.
 
 The public API is identical to Linux; only the device string differs. `DeviceInfo.ID` holds the opaque WASAPI endpoint-id string (`Card`/`Device` are Linux-only), and `Config.Device` takes that string, or `""` / `"default"` for the default capture endpoint. The requested rate, channel count, and sample format are negotiated exactly or `Open` fails with a typed error:
 
-- `*BadRateError` — the exact rate is unsupported (carries the endpoint's supported range when it can be determined).
-- `*BadFormatError` — the channel-count / sample-format combination is unsupported. Exclusive endpoints commonly accept only specific layouts (e.g. stereo S16 but not mono), and the library returns this rather than up/down-mixing or converting.
-- `ErrExclusiveNotAllowed`, `ErrDeviceInUse`, `ErrDeviceGone` — exclusive access disabled for the endpoint, held by another application, or the endpoint was invalidated (unplugged) mid-capture.
+- `*BadRateError`: the exact rate is unsupported (carries the endpoint's supported range when it can be determined).
+- `*BadFormatError`: the channel-count / sample-format combination is unsupported. Exclusive endpoints commonly accept only specific layouts (e.g. stereo S16 but not mono), and the library returns this rather than up/down-mixing or converting.
+- `ErrExclusiveNotAllowed`, `ErrDeviceInUse`, `ErrDeviceGone`: exclusive access disabled for the endpoint, held by another application, or the endpoint was invalidated (unplugged) mid-capture.
 
 ```go
 devs, _ := capture.Devices() // []DeviceInfo{ID: "{0.0.1.00000000}.{guid}", Name: "Microphone (...)"}
@@ -105,7 +105,30 @@ go run ./cmd/gac-rec -list
 go run ./cmd/gac-rec -d "default" -r 48000 -c 2 -f s16 -t 10s -o out.wav
 ```
 
-Validated on real hardware — a Sound Blaster ZxR (48 kHz) and a Solid State Logic SSL 2 MkII (48 and 192 kHz): captured audio duration matches wall-clock (real-time), zero xruns, gap-free including at 192 kHz, with `*BadRateError`/`*BadFormatError` confirmed on unsupported rates and channel layouts.
+Validated on real hardware, a Sound Blaster ZxR (48 kHz) and a Solid State Logic SSL 2 MkII (48 and 192 kHz): captured audio duration matches wall-clock (real-time), zero xruns, gap-free including at 192 kHz, with `*BadRateError`/`*BadFormatError` confirmed on unsupported rates and channel layouts.
+
+## Performance vs malgo/miniaudio
+
+This library exists for debuggability and a clean cgo-free build, not for raw speed, and a direct measurement bears that out: at typical capture rates the CPU cost is the same, and the measurable wins are memory and process footprint.
+
+Both paths captured from the same USB interface at its native 48 kHz / 2 ch / S32LE, so neither side resampled or converted. The malgo path was configured the way BirdNET-Go drives it (miniaudio defaults, `Alsa.NoMMap=1`, device selected by id). Each figure is the mean of three 60 s steady-state windows (3 s warmup discarded), self-measured with `getrusage(RUSAGE_SELF)` (which aggregates miniaudio's own capture thread), Go `runtime.MemStats`, and `/proc/self/status`. The native binary was built `CGO_ENABLED=0`.
+
+| Metric (48 kHz stereo S32, 60 s window) | this library (pure Go) | malgo / miniaudio (cgo) |
+|---|---|---|
+| CPU, % of one core | ~0.42% | ~0.40% |
+| Peak resident memory (RSS) | 3.9 MB | 8.3 MB |
+| Go live heap | ~340 KiB | ~330 KiB |
+| Heap allocated over the window | ~6 KiB, 0 GC | ~6 KiB, 0 GC |
+| OS threads | 5 | 7 |
+| cgo calls / s | 0 | ~47 |
+| Dropped frames / xruns | 0 | 0 |
+
+- CPU is a wash. Both sit near 0.4% of one core, and the run-to-run spread is wider than the gap between them: steady-state capture is dominated by the same ALSA read syscall on both sides.
+- Resident memory is roughly 2x lower. The Go heap is tiny and near-identical on both, so the extra ~4 MB on the malgo side is miniaudio's C runtime and buffers, off-heap and invisible to Go's GC, visible only as process RSS.
+- Both are allocation-free in steady state (no GC cycles across 60 s), so neither adds GC pressure to a host application.
+- The cgo backend crosses the C/Go boundary about once per callback and runs two extra OS threads. The pure-Go backend does neither and links as a static binary with no libasound and no C toolchain.
+
+Caveats: these numbers are one machine, one device, at 48 kHz. They do not cover high sample rates (for example 256 kHz ultrasonic), where zero-copy period handling could diverge, and they measure the bare capture path (counting delivered PCM), not any downstream conversion or routing.
 
 ## Development
 
