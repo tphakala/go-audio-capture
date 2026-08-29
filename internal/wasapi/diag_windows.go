@@ -21,7 +21,7 @@ import (
 // whether the delivered frame count matches the device's own advance.
 type captureDiag struct {
 	calls         uint64 // GetBuffer calls that returned a non-empty packet
-	deviceFrames  uint64 // sum of numFrames across packets (what the code delivers)
+	deviceFrames  uint64 // raw sum of packet frame counts (a naive drain would deliver this; the fixed loop delivers ~span, skipping re-presented frames)
 	firstPos      uint64
 	firstSet      bool
 	lastPosEnd    uint64 // devicePosition + numFrames of the most recent packet
@@ -60,8 +60,9 @@ func (d *captureDiag) record(devPos uint64, numFrames, flags uint32) {
 }
 
 // dump writes the diagnostics to stderr when GAC_WASAPI_DIAG is set. span is the
-// device's own reported advance; deviceFrames is what the code delivered. They
-// diverge exactly by the net overlap/gap, which is the root-cause signal.
+// device's own reported advance (≈ what the fixed loop delivers); deviceFrames is
+// the raw packet-frame sum (what a naive drain would deliver). They diverge
+// exactly by the net overlap/gap, which is the root-cause signal.
 func (d *captureDiag) dump(rate int) {
 	if os.Getenv("GAC_WASAPI_DIAG") == "" {
 		return

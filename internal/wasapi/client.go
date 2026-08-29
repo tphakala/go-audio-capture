@@ -35,8 +35,9 @@ type Client struct {
 	neg   Negotiated
 	carry []byte // whole-frame overflow from a packet larger than the caller's buffer
 
-	nextPos uint64 // expected devicePosition of the next packet (frames), for overlap/gap detection
+	nextPos uint64 // monotonic high-water mark of delivered device frames, for overlap/gap detection
 	havePos bool   // whether nextPos has been seeded by the first packet
+	posLive bool   // whether devicePosition has demonstrated a forward advance (arms overlap-skip)
 
 	// getPacketFn/releaseFn are the IAudioCaptureClient seam fill() drives;
 	// production wires the real GetBuffer/ReleaseBuffer, tests inject fakes.
@@ -280,8 +281,19 @@ func (c *Client) fill(buf []byte) (frames int, discontinuity bool, err error) {
 	c.diag.record(pkt.devPos, pkt.frames, pkt.flags)
 
 	disc := pkt.flags&bufferFlagsDataDiscontinuity != 0
+	end := pkt.devPos + uint64(pkt.frames)
+	// A packet that extends past the high-water mark is a forward advance, which
+	// proves devicePosition is live and (stickily) arms overlap-skipping. This is
+	// evaluated BEFORE the skip so a packet that both advances and overlaps still
+	// gets its overlapping prefix skipped. Some drivers report a constant position
+	// (e.g. always 0): they never advance, posLive never arms, and every packet is
+	// delivered unconditionally as the pre-devicePosition drain loop did, rather
+	// than being dropped as a false overlap (which would silence the stream).
+	if c.havePos && end > c.nextPos {
+		c.posLive = true
+	}
 	skip := uint32(0)
-	if c.havePos {
+	if c.havePos && c.posLive {
 		switch {
 		case pkt.devPos < c.nextPos: // overlap: skip frames already delivered
 			if over := c.nextPos - pkt.devPos; over >= uint64(pkt.frames) {
@@ -293,7 +305,12 @@ func (c *Client) fill(buf []byte) (frames int, discontinuity bool, err error) {
 			disc = true
 		}
 	}
-	c.nextPos = pkt.devPos + uint64(pkt.frames)
+	// nextPos is a monotonic high-water mark; never let a re-presented earlier
+	// packet rewind it, which would re-admit already-delivered frames as a fresh
+	// region or misread the next contiguous packet as a gap.
+	if !c.havePos || end > c.nextPos {
+		c.nextPos = end
+	}
 	c.havePos = true
 
 	if use := pkt.frames - skip; use > 0 {
