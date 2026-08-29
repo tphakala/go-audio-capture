@@ -15,11 +15,13 @@ env:
 permissions:
   contents: read
 
-# Phase 1 is a Linux-only ALSA capture backend, so CI runs on Linux only.
-# A Windows/macOS matrix is added when the WASAPI and CoreAudio backends land.
+# Phase 1 is the Linux ALSA backend; phase 2 adds the Windows WASAPI backend.
+# CI builds/tests on Linux and Windows and cross-compiles the Windows target
+# from the Linux job so a break is caught from either side. (macOS/CoreAudio
+# grows the matrix further when it lands.)
 jobs:
   test:
-    name: Test
+    name: Test (Linux)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -36,6 +38,9 @@ jobs:
       - name: Build (linux/arm64, CGO disabled)
         run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./...
 
+      - name: Cross-compile Windows target (windows/amd64)
+        run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build ./...
+
       - name: Test with coverage
         run: go test -race -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
 
@@ -45,13 +50,40 @@ jobs:
           files: coverage.out
           fail_ci_if_error: false
 
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build
+        run: go build ./...
+
+      # The GitHub Windows runner has no capture hardware; the enumeration
+      # integration test skips gracefully on an empty device list, and the rest
+      # of the suite is seam-injected and hardware-free.
+      - name: Test with race detector
+        run: go test -race ./...
+
   vet:
     name: Vet
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        goarch: [amd64, arm64]
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -61,12 +93,17 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - name: Run go vet
         env:
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: go vet ./...
 
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, windows]
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -82,7 +119,9 @@ jobs:
             echo "$files"
             exit 1
           fi
-      - name: golangci-lint
+      - name: golangci-lint (GOOS=${{ matrix.goos }})
         uses: golangci/golangci-lint-action@v9
+        env:
+          GOOS: ${{ matrix.goos }}
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}

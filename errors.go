@@ -8,6 +8,19 @@ import (
 // ErrClosed is returned by Stream.Read once the stream has been closed.
 var ErrClosed = errors.New("capture: stream is closed")
 
+// ErrExclusiveNotAllowed reports that the device cannot be opened for exclusive
+// capture because exclusive access is disabled for it (Windows: "Allow
+// applications to take exclusive control of this device" is unchecked).
+var ErrExclusiveNotAllowed = errors.New("capture: exclusive access disabled for this device")
+
+// ErrDeviceInUse reports that the device is held exclusively by another
+// application.
+var ErrDeviceInUse = errors.New("capture: device is in use by another application")
+
+// ErrDeviceGone reports that the device disappeared (unplugged, disabled, or
+// otherwise invalidated) during use. Read returns it instead of hanging.
+var ErrDeviceGone = errors.New("capture: device is gone")
+
 // BadDeviceError reports a device ID that is not a valid "hw:card,device"
 // (or "card,device", or "hw:card") string.
 type BadDeviceError struct {
@@ -28,7 +41,25 @@ type BadRateError struct {
 }
 
 func (e *BadRateError) Error() string {
+	if e.Min == 0 && e.Max == 0 {
+		return fmt.Sprintf("capture: sample rate %d Hz not supported", e.Requested)
+	}
 	return fmt.Sprintf("capture: sample rate %d Hz not supported (hardware range %d..%d Hz)", e.Requested, e.Min, e.Max)
+}
+
+// BadFormatError reports that the device does not support the requested channel
+// count / sample-format combination, distinct from an unsupported rate. Some
+// devices (notably in Windows exclusive mode) accept only specific channel
+// counts and bit depths; the library returns this rather than up/down-mixing or
+// converting the sample format.
+type BadFormatError struct {
+	Rate     int
+	Channels int
+	Format   Format
+}
+
+func (e *BadFormatError) Error() string {
+	return fmt.Sprintf("capture: format %d ch / %s @ %d Hz not supported", e.Channels, e.Format, e.Rate)
 }
 
 // ConfigError reports an invalid field in a Config passed to Open.

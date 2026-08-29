@@ -33,3 +33,6 @@ coverage.txt
 
 # Orchestration scratch (session-local, never committed)
 /.superpowers/
+
+# Throwaway WASAPI spike (plan: never merged)
+/cmd/gac-spike-wasapi/
