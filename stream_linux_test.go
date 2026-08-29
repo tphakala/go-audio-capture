@@ -176,7 +176,7 @@ func TestReadAfterCloseReturnsErrClosed(t *testing.T) {
 func TestReadMapsRecoverEBADFToErrClosed(t *testing.T) {
 	fp := &fakePCM{
 		readFn:    func() (int, error) { return 0, unix.ESTRPIPE }, // triggers Recover
-		recoverFn: func(error) error { return &recoverErr{unix.EBADF} },
+		recoverFn: func(error) error { return &recoverError{unix.EBADF} },
 	}
 	defer swapOpenPCM(fp)()
 	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatS16LE})
@@ -189,12 +189,12 @@ func TestReadMapsRecoverEBADFToErrClosed(t *testing.T) {
 	}
 }
 
-// recoverErr wraps an errno the way alsa's ioctlError does, so errors.Is unwraps
+// recoverError wraps an errno the way alsa's ioctlError does, so errors.Is unwraps
 // to the underlying errno.
-type recoverErr struct{ err error }
+type recoverError struct{ err error }
 
-func (e *recoverErr) Error() string { return "recover: " + e.err.Error() }
-func (e *recoverErr) Unwrap() error { return e.err }
+func (e *recoverError) Error() string { return "recover: " + e.err.Error() }
+func (e *recoverError) Unwrap() error { return e.err }
 
 func TestOpenRejectsBadConfig(t *testing.T) {
 	defer swapOpenPCM(&fakePCM{readFn: func() (int, error) { return 0, nil }})()
