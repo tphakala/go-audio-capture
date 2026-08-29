@@ -21,6 +21,10 @@ type ioctlFunc func(fd int, req uintptr, arg unsafe.Pointer) error
 type PCM struct {
 	fd    int
 	ioctl ioctlFunc
+	// xferi is reused across ReadI calls so the per-read transfer descriptor
+	// never heap-allocates. ReadI is single-consumer (Stream.Read drives it),
+	// and Recover never touches this field, so reuse is race-free.
+	xferi Xferi
 }
 
 // Negotiated reports the configuration the hardware actually accepted. With no
@@ -170,19 +174,18 @@ func (p *PCM) ReadI(buf []byte, frames int) (int, error) {
 	if frames <= 0 || len(buf) == 0 {
 		return 0, nil
 	}
-	x := Xferi{
-		Buf:    unsafe.Pointer(&buf[0]),
-		Frames: uint64(frames),
-	}
-	err := p.ioctl(p.fd, iocReadIFrames, unsafe.Pointer(&x))
+	// Reuse the preallocated descriptor; Result is overwritten by the ioctl.
+	p.xferi.Buf = unsafe.Pointer(&buf[0])
+	p.xferi.Frames = uint64(frames)
+	err := p.ioctl(p.fd, iocReadIFrames, unsafe.Pointer(&p.xferi))
 	runtime.KeepAlive(buf)
 	if err != nil {
 		return 0, err
 	}
-	if x.Result < 0 {
-		return 0, unix.Errno(-x.Result)
+	if p.xferi.Result < 0 {
+		return 0, unix.Errno(-p.xferi.Result)
 	}
-	return int(x.Result), nil
+	return int(p.xferi.Result), nil
 }
 
 // Recover handles a transfer error. An overrun (EPIPE) is cleared by
