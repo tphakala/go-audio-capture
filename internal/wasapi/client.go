@@ -35,8 +35,9 @@ type Client struct {
 	neg   Negotiated
 	carry []byte // whole-frame overflow from a packet larger than the caller's buffer
 
-	mu     sync.Mutex // serializes buffer access against Close teardown
-	closed atomic.Bool
+	mu       sync.Mutex // serializes buffer access against Close teardown
+	closed   atomic.Bool
+	readerWG sync.WaitGroup // tracks an in-flight Read so Close waits before closing event handles
 }
 
 // Open resolves an endpoint (id, or "" / "default" for the default capture
@@ -65,7 +66,10 @@ func Open(id string) (*Client, error) {
 // and bit depth, or fails with a typed error (*BadRateError for an unsupported
 // rate, *BadFormatError for an unsupported channel/format combo, or a sentinel-
 // wrapped HRESULT for exclusive-disallowed / device-in-use / device-gone). On
-// success the endpoint is initialized event-driven and prepared; call Start.
+// success the endpoint is initialized event-driven and prepared; call Start. On
+// error the Client may hold partially initialized state; the caller must still
+// call Close (idempotent) to release it. The sole caller (the public Stream)
+// does this.
 func (c *Client) Negotiate(rate, channels, bits int) (Negotiated, error) {
 	format := pcmFormat(rate, channels, bits)
 	if hr := c.isFormatSupported(format); hr != sOK {
@@ -143,9 +147,12 @@ func (c *Client) classifyUnsupported(rate, channels, bits int) error {
 	return &BadRateError{Requested: rate, Min: lo, Max: hi}
 }
 
-// Start begins capture (IAudioClient::Start).
+// Start begins capture (IAudioClient::Start). It holds c.mu so it cannot race a
+// concurrent Close that nils the COM pointers.
 func (c *Client) Start() error {
-	if c.closed.Load() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed.Load() || c.client == nil {
 		return ErrClosed
 	}
 	r, _, _ := syscall.SyscallN(methodAddr(c.client, mClientStart), uintptr(c.client))
@@ -165,6 +172,19 @@ func (c *Client) Read(buf []byte) (frames int, discontinuity bool, err error) {
 	if frameBytes == 0 || len(buf) < frameBytes {
 		return 0, false, nil
 	}
+	// Register as the active reader under c.mu so Close waits for this Read to
+	// exit before it closes the event handles passed to WaitForMultipleObjects.
+	// Setting c.closed under c.mu in Close makes every Add happen-before Close's
+	// Wait, so there is no Add-after-Wait race.
+	c.mu.Lock()
+	if c.closed.Load() {
+		c.mu.Unlock()
+		return 0, false, ErrClosed
+	}
+	c.readerWG.Add(1)
+	c.mu.Unlock()
+	defer c.readerWG.Done()
+
 	for {
 		if c.closed.Load() {
 			return 0, false, ErrClosed
@@ -237,8 +257,11 @@ func (c *Client) fill(buf []byte) (frames int, discontinuity bool, err error) {
 		pktBytes := int(numFrames) * frameBytes
 		var copied int
 		if flags&bufferFlagsSilent != 0 {
-			// SILENT: the packet memory is undefined; deliver zeros.
-			copied = copy(buf[n:whole], make([]byte, min(pktBytes, whole-n)))
+			// SILENT: the packet memory is undefined; deliver zeros. Clear the
+			// destination in place rather than allocating a scratch zero slice
+			// on this per-packet drain path.
+			copied = min(pktBytes, whole-n)
+			clear(buf[n : n+copied])
 			if copied < pktBytes {
 				c.carry = append(c.carry, make([]byte, pktBytes-copied)...)
 			}
@@ -262,12 +285,24 @@ func (c *Client) Negotiated() Negotiated { return c.neg }
 // parked in WaitForMultipleObjects by signaling the close event, then tears down
 // the COM objects under c.mu so it cannot race a concurrent fill.
 func (c *Client) Close() error {
+	// Set closed under c.mu and wake a parked Read. Doing the Swap under the lock
+	// orders it against Read's mu-guarded readerWG.Add, so Wait below cannot race
+	// an Add.
+	c.mu.Lock()
 	if c.closed.Swap(true) {
+		c.mu.Unlock()
 		return nil
 	}
 	if c.closeEvent != 0 {
 		_ = windows.SetEvent(c.closeEvent) // wake a parked Read
 	}
+	c.mu.Unlock()
+
+	// Wait for an in-flight Read to observe closed and return before we destroy
+	// the event handles it may still be waiting on (closing a handle another
+	// thread waits on is Win32 UB, and the integer could be recycled).
+	c.readerWG.Wait()
+
 	c.mu.Lock()
 	if c.client != nil {
 		_, _, _ = syscall.SyscallN(methodAddr(c.client, mClientStop), uintptr(c.client))

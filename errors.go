@@ -32,8 +32,9 @@ func (e *BadDeviceError) Error() string {
 }
 
 // BadRateError reports that the hardware does not support the exact requested
-// sample rate; Min and Max bound the supported range. It is returned instead of
-// silently negotiating a different rate.
+// sample rate; Min and Max bound the supported range when it can be determined.
+// When it cannot (both are 0, e.g. a Windows exclusive-mode rejection), Error()
+// omits the range. It is returned instead of silently negotiating a different rate.
 type BadRateError struct {
 	Requested int
 	Min       int

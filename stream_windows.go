@@ -87,8 +87,9 @@ func (s *Stream) Start() error {
 
 // Read fills buf with whole interleaved frames and returns the number of frames
 // read. It blocks until at least one frame is available. A DATA_DISCONTINUITY is
-// counted as an xrun (Xruns is bumped) but is not an error; Read only returns an
-// error when the stream is closed (ErrClosed) or the device is gone (ErrDeviceGone).
+// counted as an xrun (Xruns is bumped) but is not an error. Read returns ErrClosed
+// when the stream is closed and ErrDeviceGone when the endpoint is invalidated;
+// any other device error is returned as-is.
 func (s *Stream) Read(buf []byte) (int, error) {
 	if s.closed.Load() {
 		return 0, ErrClosed

@@ -1,3 +1,5 @@
+//go:build linux || windows
+
 // Command gac-rec is a spike/debug tool: it records a few seconds of audio from
 // a capture device through go-audio-capture and writes a WAV file, printing the
 // negotiated parameters and the xrun count on exit. It exists to validate

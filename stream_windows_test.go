@@ -10,6 +10,10 @@ import (
 	"github.com/tphakala/go-audio-capture/internal/wasapi"
 )
 
+// errUnclassifiedProbe stands in for an internal error that translateWASAPIError
+// does not classify, to assert the default branch passes it through unchanged.
+var errUnclassifiedProbe = errors.New("wasapi: unclassified probe error")
+
 // fakeDevice implements the wasapiDevice seam so Open/Read/Close are testable
 // with no audio hardware, mirroring fakePCM on the Linux side.
 type fakeDevice struct {
@@ -17,6 +21,7 @@ type fakeDevice struct {
 	negErr  error
 	readFn  func() (int, bool, error)
 	block   chan struct{} // closed by Close to unblock a parked Read
+	parked  chan struct{} // closed by readFn once it is about to park, if non-nil
 	started bool
 }
 
@@ -53,7 +58,11 @@ func TestOpenReportsNegotiated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	got := s.Negotiated()
 	if got.Rate != 48000 || got.Channels != 2 || got.PeriodFrames != 480 || got.Periods != 1 {
 		t.Errorf("Negotiated = %+v, want rate 48000, ch 2, period 480, periods 1", got)
@@ -77,7 +86,11 @@ func TestReadCountsDiscontinuity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 
 	if n, err := s.Read(make([]byte, 480*2)); err != nil || n != 480 {
 		t.Fatalf("Read = %d, %v; want 480, nil", n, err)
@@ -95,9 +108,10 @@ func TestReadCountsDiscontinuity(t *testing.T) {
 }
 
 func TestCloseUnblocksRead(t *testing.T) {
-	f := &fakeDevice{block: make(chan struct{})}
+	f := &fakeDevice{block: make(chan struct{}), parked: make(chan struct{})}
 	f.readFn = func() (int, bool, error) {
-		<-f.block // park until Close unblocks us
+		close(f.parked) // signal that Read has reached the park
+		<-f.block       // park until Close unblocks us
 		return 0, false, wasapi.ErrClosed
 	}
 	defer swapOpenDevice(f)()
@@ -107,7 +121,7 @@ func TestCloseUnblocksRead(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { _, e := s.Read(make([]byte, 96)); done <- e }()
-	time.Sleep(20 * time.Millisecond) // let Read park in the device
+	<-f.parked // deterministically wait until Read has parked, no timing guess
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -127,7 +141,9 @@ func TestReadAfterCloseReturnsErrClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	_ = s.Close()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 	if _, err := s.Read(make([]byte, 96)); !errors.Is(err, ErrClosed) {
 		t.Errorf("Read after Close = %v, want ErrClosed", err)
 	}
@@ -166,7 +182,7 @@ func TestOpenTranslatesNegotiateErrors(t *testing.T) {
 			&wasapi.BadFormatError{Rate: 48000, Channels: 1, Bits: 16},
 			func(e error) bool {
 				var b *BadFormatError
-				return errors.As(e, &b) && b.Channels == 1 && b.Format == FormatS16LE
+				return errors.As(e, &b) && b.Rate == 48000 && b.Channels == 1 && b.Format == FormatS16LE
 			},
 		},
 		{
@@ -178,6 +194,16 @@ func TestOpenTranslatesNegotiateErrors(t *testing.T) {
 			"device in use",
 			wasapi.ErrDeviceInUse,
 			func(e error) bool { return errors.Is(e, ErrDeviceInUse) },
+		},
+		{
+			"device gone",
+			wasapi.ErrDeviceGone,
+			func(e error) bool { return errors.Is(e, ErrDeviceGone) },
+		},
+		{
+			"unclassified error passes through",
+			errUnclassifiedProbe,
+			func(e error) bool { return errors.Is(e, errUnclassifiedProbe) },
 		},
 	}
 	for _, tt := range tests {

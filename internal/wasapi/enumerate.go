@@ -38,6 +38,14 @@ type propVariant struct {
 	_   [8]byte
 }
 
+// vtLPWSTR is VT_LPWSTR: the only PROPVARIANT type whose val union member is a
+// wide-string pointer. Any other type must not be dereferenced as one.
+const vtLPWSTR = 31
+
+// unknownEndpointName is the friendly-name fallback when the property is
+// missing, unreadable, or not a string.
+const unknownEndpointName = "Unknown capture endpoint"
+
 // Enumerate returns all ACTIVE capture endpoints, sorted by friendly name. It
 // returns an empty slice (not an error) when the machine has no capture
 // endpoints, so callers and CI runners without audio hardware behave sanely.
@@ -54,7 +62,10 @@ func Enumerate() ([]Endpoint, error) {
 	}
 	defer release(coll)
 
-	n := collectionCount(coll)
+	n, err := collectionCount(coll)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Endpoint, 0, n)
 	for i := uint32(0); i < n; i++ {
 		dev, err := collectionItem(coll, i)
@@ -110,11 +121,16 @@ func enumEndpoints(enum unsafe.Pointer, dataFlow, stateMask uint32) (unsafe.Poin
 	return coll, nil
 }
 
-// collectionCount calls IMMDeviceCollection::GetCount.
-func collectionCount(coll unsafe.Pointer) uint32 {
+// collectionCount calls IMMDeviceCollection::GetCount. A failed GetCount is
+// returned as an error rather than folded into a zero count, so an enumeration
+// failure is not indistinguishable from a machine with no capture endpoints.
+func collectionCount(coll unsafe.Pointer) (uint32, error) {
 	var n uint32
-	_, _, _ = syscall.SyscallN(methodAddr(coll, mCollGetCount), uintptr(coll), uintptr(unsafe.Pointer(&n)))
-	return n
+	r, _, _ := syscall.SyscallN(methodAddr(coll, mCollGetCount), uintptr(coll), uintptr(unsafe.Pointer(&n)))
+	if h := hresult(uint32(r)); h.failed() {
+		return 0, &hresultError{Op: "IMMDeviceCollection::GetCount", HR: h}
+	}
+	return n, nil
 }
 
 // collectionItem calls IMMDeviceCollection::Item.
@@ -149,19 +165,24 @@ func deviceFriendlyName(dev unsafe.Pointer) string {
 	r, _, _ := syscall.SyscallN(methodAddr(dev, mDevOpenPropertyStore),
 		uintptr(dev), uintptr(stgmRead), uintptr(unsafe.Pointer(&store)))
 	if hresult(uint32(r)).failed() {
-		return "Unknown capture endpoint"
+		return unknownEndpointName
 	}
 	defer release(store)
 
 	var pv propVariant
 	r, _, _ = syscall.SyscallN(methodAddr(store, mPropGetValue),
 		uintptr(store), uintptr(unsafe.Pointer(&pkeyDeviceFriendlyName)), uintptr(unsafe.Pointer(&pv)))
-	if hresult(uint32(r)).failed() || pv.val == nil {
-		return "Unknown capture endpoint"
+	if hresult(uint32(r)).failed() {
+		return unknownEndpointName
 	}
-	name := windows.UTF16PtrToString((*uint16)(pv.val))
-	_, _, _ = procPropVariantClr.Call(uintptr(unsafe.Pointer(&pv)))
-	return name
+	defer func() { _, _, _ = procPropVariantClr.Call(uintptr(unsafe.Pointer(&pv))) }()
+	// Only VT_LPWSTR carries a wide-string pointer in val; a driver returning any
+	// other type (VT_EMPTY, VT_I4, ...) would otherwise be dereferenced as a
+	// string pointer and read arbitrary memory.
+	if pv.vt != vtLPWSTR || pv.val == nil {
+		return unknownEndpointName
+	}
+	return windows.UTF16PtrToString((*uint16)(pv.val))
 }
 
 // activateAudioClient calls IMMDevice::Activate(IID_IAudioClient).

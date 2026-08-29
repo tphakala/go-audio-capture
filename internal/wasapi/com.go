@@ -27,11 +27,13 @@ const (
 
 	hrRPCChangedMode hresult = 0x80010106 // RPC_E_CHANGED_MODE
 
-	hrUnsupportedFormat    hresult = 0x88890008 // AUDCLNT_E_UNSUPPORTED_FORMAT
-	hrExclusiveNotAllowed  hresult = 0x8889000A // AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED
-	hrDeviceInUse          hresult = 0x8889000B // AUDCLNT_E_DEVICE_IN_USE
-	hrBufferSizeNotAligned hresult = 0x88890019 // AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED
-	hrDeviceInvalidated    hresult = 0x88890013 // AUDCLNT_E_DEVICE_INVALIDATED
+	// AUDCLNT_E_* values are MAKE_HRESULT(SEVERITY_ERROR, FACILITY_AUDCLNT=0x889, n),
+	// so the low byte is the audioclient.h ordinal n.
+	hrUnsupportedFormat    hresult = 0x88890008 // AUDCLNT_E_UNSUPPORTED_FORMAT (n=0x08)
+	hrExclusiveNotAllowed  hresult = 0x8889000E // AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED (n=0x0E)
+	hrDeviceInUse          hresult = 0x8889000A // AUDCLNT_E_DEVICE_IN_USE (n=0x0A)
+	hrBufferSizeNotAligned hresult = 0x88890019 // AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED (n=0x19)
+	hrDeviceInvalidated    hresult = 0x88890004 // AUDCLNT_E_DEVICE_INVALIDATED (n=0x04)
 	hrNotInitialized       hresult = 0x88890001 // AUDCLNT_E_NOT_INITIALIZED
 	hrBufferEmpty          hresult = 0x08890001 // AUDCLNT_S_BUFFER_EMPTY (success)
 )

@@ -4,8 +4,11 @@ package wasapi
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // The WAVEFORMATEXTENSIBLE layout is load-bearing: a wrong offset produces a
@@ -56,8 +59,8 @@ func TestChannelMask(t *testing.T) {
 
 func TestPCMFormat(t *testing.T) {
 	f := pcmFormat(48000, 2, 16)
-	if f.wFormatTag != wfTagExtensible {
-		t.Errorf("wFormatTag = %#x, want %#x", f.wFormatTag, wfTagExtensible)
+	if f.wFormatTag != 0xFFFE { // WAVE_FORMAT_EXTENSIBLE, pinned by literal
+		t.Errorf("wFormatTag = %#x, want 0xFFFE", f.wFormatTag)
 	}
 	if f.nChannels != 2 || f.nSamplesPerSec != 48000 || f.wBitsPerSample != 16 {
 		t.Errorf("basic fields = %d ch, %d Hz, %d bits", f.nChannels, f.nSamplesPerSec, f.wBitsPerSample)
@@ -65,8 +68,8 @@ func TestPCMFormat(t *testing.T) {
 	if f.nBlockAlign != 4 { // 2 ch * 2 bytes
 		t.Errorf("nBlockAlign = %d, want 4", f.nBlockAlign)
 	}
-	if f.nAvgBytesPerSec != 48000*4 {
-		t.Errorf("nAvgBytesPerSec = %d, want %d", f.nAvgBytesPerSec, 48000*4)
+	if f.nAvgBytesPerSec != 192000 { // 48000 Hz * 4 bytes/frame, pinned by literal
+		t.Errorf("nAvgBytesPerSec = %d, want 192000", f.nAvgBytesPerSec)
 	}
 	if f.cbSize != 22 {
 		t.Errorf("cbSize = %d, want 22", f.cbSize)
@@ -74,7 +77,11 @@ func TestPCMFormat(t *testing.T) {
 	if f.wValidBitsPerSample != 16 || f.dwChannelMask != 0x3 {
 		t.Errorf("extension = validBits %d, mask %#x", f.wValidBitsPerSample, f.dwChannelMask)
 	}
-	if f.subFormat != ksSubtypePCM {
+	// KSDATAFORMAT_SUBTYPE_PCM {00000001-0000-0010-8000-00AA00389B71}, pinned by a
+	// local literal so a typo in the package-level ksSubtypePCM cannot move both
+	// sides of the comparison together (which would defeat the check).
+	wantPCM := windows.GUID{Data1: 0x00000001, Data2: 0x0000, Data3: 0x0010, Data4: [8]byte{0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}}
+	if f.subFormat != wantPCM {
 		t.Errorf("subFormat = %+v, want KSDATAFORMAT_SUBTYPE_PCM", f.subFormat)
 	}
 }
@@ -102,11 +109,11 @@ func TestNegotiatedBlockAlign(t *testing.T) {
 
 func TestBadRateErrorMessage(t *testing.T) {
 	withRange := (&BadRateError{Requested: 48000, Min: 44100, Max: 96000}).Error()
-	if !contains(withRange, "44100..96000") {
+	if !strings.Contains(withRange, "44100..96000") {
 		t.Errorf("BadRateError with range = %q, want a range", withRange)
 	}
 	noRange := (&BadRateError{Requested: 256000}).Error()
-	if contains(noRange, "..") {
+	if strings.Contains(noRange, "..") {
 		t.Errorf("BadRateError without range = %q, should omit range", noRange)
 	}
 }
@@ -142,11 +149,29 @@ func TestHResultFailed(t *testing.T) {
 	}
 }
 
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
+// TestHResultConstantValues pins the AUDCLNT_E_* codes to their audioclient.h
+// values numerically. AUDCLNT_E_* = MAKE_HRESULT(SEVERITY_ERROR,
+// FACILITY_AUDCLNT=0x889, n), so the low byte is the ordinal n. A wrong value is
+// a syntactically valid uint32 that vet and lint cannot catch; it silently
+// misclassifies runtime errors (verified on hardware: a rate change on an
+// interface invalidated the endpoint and IMMDevice::Activate returned
+// AUDCLNT_E_DEVICE_INVALIDATED = 0x88890004).
+func TestHResultConstantValues(t *testing.T) {
+	tests := []struct {
+		name string
+		got  hresult
+		want uint32
+	}{
+		{"AUDCLNT_E_UNSUPPORTED_FORMAT", hrUnsupportedFormat, 0x88890008},
+		{"AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED", hrExclusiveNotAllowed, 0x8889000E},
+		{"AUDCLNT_E_DEVICE_IN_USE", hrDeviceInUse, 0x8889000A},
+		{"AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED", hrBufferSizeNotAligned, 0x88890019},
+		{"AUDCLNT_E_DEVICE_INVALIDATED", hrDeviceInvalidated, 0x88890004},
+		{"AUDCLNT_E_NOT_INITIALIZED", hrNotInitialized, 0x88890001},
+	}
+	for _, tt := range tests {
+		if uint32(tt.got) != tt.want {
+			t.Errorf("%s = 0x%08X, want 0x%08X", tt.name, uint32(tt.got), tt.want)
 		}
 	}
-	return false
 }
