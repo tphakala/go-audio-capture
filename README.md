@@ -22,7 +22,7 @@ miniaudio has served well, but the cgo boundary keeps costing debugging time: AL
 | Phase | Platform | Backend | Status |
 |-------|----------|---------|--------|
 | 1 | Linux | ALSA via kernel ioctl (/dev/snd), no libasound | implemented (see below) |
-| 2 | Windows | WASAPI via COM/syscall | planned |
+| 2 | Windows (64-bit) | WASAPI (exclusive mode) via hand-rolled COM/syscall | implemented (see below) |
 | 3 | macOS | CoreAudio/AudioToolbox via purego (still cgo-free) | planned |
 
 Non-goals: playback, mobile platforms, full miniaudio parity, pro-audio latency.
@@ -73,6 +73,39 @@ go run ./cmd/gac-rec -d hw:1,0 -r 256000 -c 1 -f s16 -t 10s -o out.wav
 ```
 
 Validated against the `snd-aloop` loopback (the same kernel ioctl path as a physical card) at 48/192/384 kHz S16 and 48 kHz S32, FFT-verified: a 60 kHz tone at 384 kHz round-trips with all spectral energy above 24 kHz and zero xruns, the exact ultrasonic case dsnoop broke. Field validation on real arm64 hardware with an ultrasonic USB mic is tracked in the tracker.
+
+## Phase 2: Windows WASAPI
+
+The Windows backend talks to WASAPI through hand-rolled COM over `golang.org/x/sys/windows` (no cgo, no third-party COM or audio dependency), the Windows analog of the ALSA backend. It captures in **exclusive mode only** (`AUDCLNT_SHAREMODE_EXCLUSIVE`), the WASAPI equivalent of ALSA `hw:` access: the format is negotiated directly with the endpoint. Shared mode is deliberately unsupported, because the OS mixer resamples to the engine mix rate and converts the sample format behind the caller's back — the same silent conversion the library exists to avoid. `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` is never used.
+
+The public API is identical to Linux; only the device string differs. `DeviceInfo.ID` holds the opaque WASAPI endpoint-id string (`Card`/`Device` are Linux-only), and `Config.Device` takes that string, or `""` / `"default"` for the default capture endpoint. The requested rate, channel count, and sample format are negotiated exactly or `Open` fails with a typed error:
+
+- `*BadRateError` — the exact rate is unsupported (carries the endpoint's supported range when it can be determined).
+- `*BadFormatError` — the channel-count / sample-format combination is unsupported. Exclusive endpoints commonly accept only specific layouts (e.g. stereo S16 but not mono), and the library returns this rather than up/down-mixing or converting.
+- `ErrExclusiveNotAllowed`, `ErrDeviceInUse`, `ErrDeviceGone` — exclusive access disabled for the endpoint, held by another application, or the endpoint was invalidated (unplugged) mid-capture.
+
+```go
+devs, _ := capture.Devices() // []DeviceInfo{ID: "{0.0.1.00000000}.{guid}", Name: "Microphone (...)"}
+
+s, err := capture.Open(capture.Config{
+    Device:   "default", // or an endpoint-id string from Devices()
+    Rate:     48000,     // exact; no silent resampling
+    Channels: 2,
+    Format:   capture.FormatS16LE,
+})
+// ... Start / Read / Close exactly as on Linux
+```
+
+Capture is event-driven: `Read` blocks on the audio-ready event and an internal close event, so `Close` unblocks a parked `Read` from another goroutine. `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` and device overruns are counted via `Stream.Xruns()`. Delivered frames are kept equal to the device's own advance (via the packet `devicePosition`), so drivers that re-present buffers do not over-deliver and high-rate streams do not silently drop. The backend is 64-bit only (`amd64`/`arm64`).
+
+`cmd/gac-rec` is cross-platform; on Windows the device is an endpoint-id string or `"default"`:
+
+```
+go run ./cmd/gac-rec -list
+go run ./cmd/gac-rec -d "default" -r 48000 -c 2 -f s16 -t 10s -o out.wav
+```
+
+Validated on real hardware — a Sound Blaster ZxR (48 kHz) and a Solid State Logic SSL 2 MkII (48 and 192 kHz): captured audio duration matches wall-clock (real-time), zero xruns, gap-free including at 192 kHz, with `*BadRateError`/`*BadFormatError` confirmed on unsupported rates and channel layouts.
 
 ## Development
 
