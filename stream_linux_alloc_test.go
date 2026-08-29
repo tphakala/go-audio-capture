@@ -19,8 +19,11 @@ func TestStreamReadAllocFree(t *testing.T) {
 
 	buf := make([]byte, 256*s.frameBytes)
 	allocs := testing.AllocsPerRun(1000, func() {
-		if _, err := s.Read(buf); err != nil {
-			t.Fatalf("Read: %v", err)
+		// Assert the frame count too: a regression that trips the
+		// frames == 0 early return in Read would do no work and allocate
+		// nothing, silently passing an n-blind check.
+		if n, err := s.Read(buf); err != nil || n != 256 {
+			t.Fatalf("Read = (%d, %v)", n, err)
 		}
 	})
 	if allocs != 0 {

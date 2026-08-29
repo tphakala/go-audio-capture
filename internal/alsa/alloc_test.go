@@ -15,6 +15,9 @@ func TestReadIAllocFree(t *testing.T) {
 		x.Result = 256
 		return nil
 	}}
+	// ReadI is frame-size-agnostic: it only needs a non-empty buffer and a
+	// valid &buf[0], so the length here is arbitrary (256 frames worth of a
+	// 4-byte S16 stereo frame), not a size ReadI validates.
 	buf := make([]byte, 256*4)
 	allocs := testing.AllocsPerRun(1000, func() {
 		if n, err := p.ReadI(buf, 256); err != nil || n != 256 {
