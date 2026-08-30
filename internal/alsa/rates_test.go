@@ -87,6 +87,25 @@ func TestSupportedRatesPropagatesRangeRefineError(t *testing.T) {
 	}
 }
 
+func TestSupportedRatesEmptyIntervalIsFatal(t *testing.T) {
+	// Some drivers signal an unsatisfiable channel/format combo by returning
+	// success with the rate interval emptied rather than EINVAL. That must still
+	// surface as EINVAL (which the public layer maps to *BadFormatError), not an
+	// empty, healthy-looking result.
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		if req == iocHwRefine {
+			hw := (*HwParams)(arg)
+			hw.Intervals[ParamRate-paramFirstInterval] = Interval{Flags: intervalEmpty}
+		}
+		return nil
+	}
+	p := newPCM(-1, fake)
+	_, _, _, err := p.SupportedRates(1, FormatS16LE, []int{48000})
+	if !errors.Is(err, unix.EINVAL) {
+		t.Fatalf("SupportedRates err = %v, want EINVAL", err)
+	}
+}
+
 func TestSupportedRatesProbeErrorIsFatal(t *testing.T) {
 	// A non-EINVAL error from a per-rate probe (here ENODEV: the device vanished
 	// mid-probe) must surface, not be swallowed as "unsupported rate" leaving a

@@ -44,6 +44,13 @@ func (p *PCM) SupportedRates(channels int, format uint32, candidates []int) (rat
 	if rerr := p.refine(&window); rerr != nil {
 		return nil, 0, 0, rerr
 	}
+	// A driver may signal an unsatisfiable channel/format combo by emptying the
+	// rate interval on a successful refine rather than returning EINVAL. Treat
+	// that the same as EINVAL so the public layer still reports *BadFormatError
+	// instead of an empty, healthy-looking result.
+	if window.IntervalEmpty(ParamRate) {
+		return nil, 0, 0, unix.EINVAL
+	}
 	rlo, rhi := window.Interval(ParamRate)
 	lo, hi = int(rlo), int(rhi)
 
