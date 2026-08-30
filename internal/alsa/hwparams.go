@@ -137,3 +137,11 @@ func (p *HwParams) Interval(param int) (lo, hi uint32) {
 	iv := p.interval(param)
 	return iv.Min, iv.Max
 }
+
+// IntervalEmpty reports whether an interval parameter carries the kernel's empty
+// flag, meaning no value satisfies the constraints. HW_REFINE normally signals
+// an unsatisfiable pin with EINVAL, but this lets a caller also detect a driver
+// that empties the interval and returns success instead.
+func (p *HwParams) IntervalEmpty(param int) bool {
+	return p.interval(param).Flags&intervalEmpty != 0
+}

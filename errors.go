@@ -21,6 +21,11 @@ var ErrDeviceInUse = errors.New("capture: device is in use by another applicatio
 // otherwise invalidated) during use. Read returns it instead of hanging.
 var ErrDeviceGone = errors.New("capture: device is gone")
 
+// ErrCapabilitiesUnsupported reports that device capability queries such as
+// SupportedRates are not implemented on this platform (currently Linux/ALSA
+// only). Callers should fall back to a static rate list.
+var ErrCapabilitiesUnsupported = errors.New("capture: capability query not supported on this platform")
+
 // BadDeviceError reports a device ID that is not a valid "hw:card,device"
 // (or "card,device", or "hw:card") string.
 type BadDeviceError struct {
@@ -52,7 +57,10 @@ func (e *BadRateError) Error() string {
 // count / sample-format combination, distinct from an unsupported rate. Some
 // devices (notably in Windows exclusive mode) accept only specific channel
 // counts and bit depths; the library returns this rather than up/down-mixing or
-// converting the sample format.
+// converting the sample format. Rate is the rate in play when the combination
+// was rejected, or 0 when the rejection is rate-independent (e.g. a capability
+// query that found the channel/format unsupported at any rate), in which case
+// Error() omits the rate.
 type BadFormatError struct {
 	Rate     int
 	Channels int
@@ -60,6 +68,9 @@ type BadFormatError struct {
 }
 
 func (e *BadFormatError) Error() string {
+	if e.Rate == 0 {
+		return fmt.Sprintf("capture: format %d ch / %s not supported", e.Channels, e.Format)
+	}
 	return fmt.Sprintf("capture: format %d ch / %s @ %d Hz not supported", e.Channels, e.Format, e.Rate)
 }
 

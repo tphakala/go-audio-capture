@@ -17,7 +17,12 @@
 //   - Typed errors wrap errno and name the failing ioctl, never an opaque
 //     "invalid argument".
 //
-// The public API (Devices, Open, Stream) is platform-neutral; the Linux ALSA
-// implementation lives in the *_linux.go files and internal/alsa. Windows
-// (WASAPI) and macOS (CoreAudio) backends are planned for later phases.
+// SupportedRates queries which sample rates a device accepts for a given
+// channel count and format, using the ALSA HW_REFINE ioctl only (no state
+// transition, so it does not disturb a device another process holds). It is
+// Linux-only and returns ErrCapabilitiesUnsupported on other platforms.
+//
+// The public API (Devices, Open, Stream, SupportedRates) is platform-neutral;
+// the Linux ALSA implementation lives in the *_linux.go files and internal/alsa.
+// Windows (WASAPI) and macOS (CoreAudio) backends are planned for later phases.
 package capture

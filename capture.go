@@ -47,6 +47,17 @@ type DeviceInfo struct {
 	Name   string
 }
 
+// RateSupport reports which sample rates a device accepts for a given channel
+// count and format, as discovered by SupportedRates. Rates lists the accepted
+// standard rates in ascending order. Min and Max bound the raw hardware rate
+// window (from a single HW_REFINE): for a device with continuous rate support
+// they describe the whole range, so a caller may pick a value not in Rates that
+// still falls within [Min, Max].
+type RateSupport struct {
+	Rates    []int
+	Min, Max int
+}
+
 // Config requests a capture configuration. Rate is honored exactly or Open
 // fails with *BadRateError: there is no silent resampling. PeriodFrames and
 // Periods default to a 20 ms period (Rate/50) and 4 periods when left zero on

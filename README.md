@@ -65,6 +65,16 @@ for {
 
 `Read` is single-consumer and blocking; `Close` may be called from another goroutine to unblock it. Overruns (xruns) are recovered internally and counted via `Stream.Xruns()`.
 
+To discover which rates a device supports before opening it (e.g. to pick a capture rate, or to offer the user a menu), `SupportedRates` probes the device with the `HW_REFINE` ioctl only. It opens the device once (non-blocking) and issues one refine per candidate rate; it never runs `HW_PARAMS`, `PREPARE`, or `START`, so it does not move the device out of its current state and does not disturb a stream another process holds. A single refine reports only the continuous `[Min, Max]` window, so each standard rate inside that window is probed individually to reveal discrete gaps.
+
+```go
+rs, err := capture.SupportedRates("hw:1,0", 2, capture.FormatS32LE)
+// rs.Rates == []int{44100, 48000, 88200, 96000}   // discrete, ascending
+// rs.Min, rs.Max == 44100, 96000                  // raw HW_REFINE window
+```
+
+If the device is held exclusively by another process the query returns `ErrDeviceInUse`; a channel/format combination the hardware cannot do at any rate returns `*BadFormatError`; a removed device returns `ErrDeviceGone`. In each case the caller should fall back to a static rate list. `SupportedRates` is Linux-only for now and returns `ErrCapabilitiesUnsupported` on other platforms.
+
 `cmd/gac-rec` is a small debug recorder used for hardware validation:
 
 ```

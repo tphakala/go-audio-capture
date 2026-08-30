@@ -83,14 +83,29 @@ type ioctlError struct {
 func (e *ioctlError) Error() string { return "alsa: " + e.Op + ": " + e.Err.Error() }
 func (e *ioctlError) Unwrap() error { return e.Err }
 
-// OpenPCM opens the capture device /dev/snd/pcmC{card}D{device}c. It tries
-// O_RDWR first (what alsa-lib uses) and falls back to O_RDONLY on a permission
-// error, since capture needs only reads.
+// OpenPCM opens the capture device /dev/snd/pcmC{card}D{device}c for streaming.
+// It tries O_RDWR first (what alsa-lib uses) and falls back to O_RDONLY on a
+// permission error, since capture needs only reads.
 func OpenPCM(card, device int) (*PCM, error) {
+	return openPCM(card, device, 0)
+}
+
+// OpenPCMForQuery opens the capture device for a capability query only, adding
+// O_NONBLOCK so the open cannot block waiting on the device. Some drivers block
+// a plain capture open until the stream is ready (snd-aloop, for one, blocks
+// until a playback client attaches); a query must never hang on that. HW_REFINE,
+// the only ioctl a query issues, is synchronous and unaffected by O_NONBLOCK.
+func OpenPCMForQuery(card, device int) (*PCM, error) {
+	return openPCM(card, device, unix.O_NONBLOCK)
+}
+
+// openPCM opens the capture PCM node with the given extra open flags, applying
+// the shared O_RDWR-then-O_RDONLY fallback so both entry points behave alike.
+func openPCM(card, device, extraFlags int) (*PCM, error) {
 	path := fmt.Sprintf("/dev/snd/pcmC%dD%dc", card, device)
-	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|extraFlags, 0)
 	if err != nil && errors.Is(err, unix.EACCES) {
-		fd, err = unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		fd, err = unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|extraFlags, 0)
 	}
 	if err != nil {
 		return nil, &ioctlError{Op: "open " + path, Err: err}
