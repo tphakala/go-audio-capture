@@ -34,7 +34,7 @@ var openRatePCM = func(card, device int) (ratePCM, error) {
 // these a given device actually accepts.
 var standardRates = []int{
 	8000, 11025, 16000, 22050, 32000, 44100, 48000,
-	64000, 88200, 96000, 176400, 192000, 352800, 384000,
+	64000, 88200, 96000, 176400, 192000, 256000, 352800, 384000,
 }
 
 // SupportedRates reports which standard sample rates the capture device accepts
