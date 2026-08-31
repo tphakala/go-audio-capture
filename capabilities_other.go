@@ -12,3 +12,13 @@ func SupportedRates(device string, channels int, format Format) (RateSupport, er
 	_ = format
 	return RateSupport{}, ErrCapabilitiesUnsupported
 }
+
+// SupportedRatesVerified is implemented only on Linux (ALSA). On every other
+// platform it returns ErrCapabilitiesUnsupported so callers can fall back to a
+// static rate list, matching SupportedRates.
+func SupportedRatesVerified(device string, channels int, format Format) (RateSupport, error) {
+	_ = device
+	_ = channels
+	_ = format
+	return RateSupport{}, ErrCapabilitiesUnsupported
+}

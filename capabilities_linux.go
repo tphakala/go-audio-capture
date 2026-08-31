@@ -16,6 +16,7 @@ import (
 // than driving a live Stream.
 type ratePCM interface {
 	SupportedRates(channels int, format uint32, candidates []int) ([]int, int, int, error)
+	VerifyRate(channels int, format uint32, rate int) (bool, error)
 	Close() error
 }
 
@@ -79,6 +80,64 @@ func SupportedRates(device string, channels int, format Format) (RateSupport, er
 		return RateSupport{}, translateQueryError(err)
 	}
 	return RateSupport{Rates: rates, Min: lo, Max: hi}, nil
+}
+
+// SupportedRatesVerified reports which standard sample rates the device can
+// actually COMMIT, not merely advertise. It runs SupportedRates first (a fast
+// HW_REFINE pass that yields the advertised window and a candidate filter), then
+// re-opens the device once per candidate and issues a full HW_PARAMS commit to
+// confirm the hardware truly delivers that rate.
+//
+// This exists because HW_REFINE over-reports on some USB Audio Class devices:
+// the driver advertises a continuous rate window (e.g. [48000, 384000]) yet only
+// a single firmware-fixed rate actually commits. A refine-only probe would offer
+// rates the device silently rejects at open; the HW_PARAMS pass drops them.
+//
+// It is more expensive than SupportedRates (one device open per advertised rate)
+// so it is meant for occasional capability discovery, not a hot path. The
+// per-candidate opens use O_NONBLOCK (like every query here) so they never block
+// on a device that gates its open on a peer, and each commit is discarded by
+// closing from the SETUP state. Errors map exactly as SupportedRates: a busy or
+// missing device yields ErrDeviceInUse / ErrDeviceGone and the caller should
+// fall back to a static list.
+func SupportedRatesVerified(device string, channels int, format Format) (RateSupport, error) {
+	rs, err := SupportedRates(device, channels, format)
+	if err != nil {
+		return RateSupport{}, err
+	}
+	if len(rs.Rates) == 0 {
+		return rs, nil // nothing advertised: nothing to verify
+	}
+
+	card, dev, err := parseDeviceID(device)
+	if err != nil {
+		return RateSupport{}, err
+	}
+	af, err := alsaFormat(format)
+	if err != nil {
+		return RateSupport{}, err
+	}
+
+	verified := make([]int, 0, len(rs.Rates))
+	for _, r := range rs.Rates {
+		// Scope the open in a closure so its Close is deferred: a panic in
+		// VerifyRate then still releases the fd rather than leaking it.
+		ok, verr := func() (bool, error) {
+			p, err := openRatePCM(card, dev)
+			if err != nil {
+				return false, err
+			}
+			defer func() { _ = p.Close() }()
+			return p.VerifyRate(channels, af, r)
+		}()
+		if verr != nil {
+			return RateSupport{}, translateQueryError(verr)
+		}
+		if ok {
+			verified = append(verified, r)
+		}
+	}
+	return RateSupport{Rates: verified, Min: rs.Min, Max: rs.Max}, nil
 }
 
 // translateQueryError maps the raw errnos a capability query can hit onto the
