@@ -196,6 +196,50 @@ type recoverError struct{ err error }
 func (e *recoverError) Error() string { return "recover: " + e.err.Error() }
 func (e *recoverError) Unwrap() error { return e.err }
 
+// TestReadMapsDeviceGoneToErrDeviceGone covers a surprise disconnect mid-stream:
+// an unrecoverable read errno signalling the device disappeared must surface as
+// ErrDeviceGone (not a raw driver errno), so a caller can retire the device with
+// errors.Is(err, ErrDeviceGone). Each errno is wrapped like alsa's ioctlError to
+// prove translation unwraps through the driver error, not just a bare errno.
+func TestReadMapsDeviceGoneToErrDeviceGone(t *testing.T) {
+	for _, errno := range []unix.Errno{unix.ENODEV, unix.ENXIO, unix.ENOENT} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			fp := &fakePCM{readFn: func() (int, error) { return 0, &recoverError{errno} }}
+			defer swapOpenPCM(fp)()
+			s, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatS16LE})
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer func() { _ = s.Close() }()
+			if _, err := s.Read(make([]byte, 96)); !errors.Is(err, ErrDeviceGone) {
+				t.Errorf("Read with %v = %v, want ErrDeviceGone", errno, err)
+			}
+		})
+	}
+}
+
+// TestReadPassesThroughNonDeviceGoneError guards the other half of
+// translateReadError's contract: an unrecoverable errno that is NOT a
+// device-gone code (EIO is a genuine read fault on a device still present) must
+// surface unchanged, never relabelled ErrDeviceGone. Without this, widening the
+// mapping (a stray default: return ErrDeviceGone) would slip through green.
+func TestReadPassesThroughNonDeviceGoneError(t *testing.T) {
+	fp := &fakePCM{readFn: func() (int, error) { return 0, &recoverError{unix.EIO} }}
+	defer swapOpenPCM(fp)()
+	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatS16LE})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	_, err = s.Read(make([]byte, 96))
+	if errors.Is(err, ErrDeviceGone) {
+		t.Errorf("Read with EIO = %v, want it passed through, not ErrDeviceGone", err)
+	}
+	if !errors.Is(err, unix.EIO) {
+		t.Errorf("Read with EIO = %v, want it to unwrap to EIO", err)
+	}
+}
+
 func TestOpenRejectsBadConfig(t *testing.T) {
 	defer swapOpenPCM(&fakePCM{readFn: func() (int, error) { return 0, nil }})()
 	tests := []Config{
