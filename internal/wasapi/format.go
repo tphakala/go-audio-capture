@@ -8,9 +8,58 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// ksSubtypePCM is KSDATAFORMAT_SUBTYPE_PCM. Only integer PCM is used; float and
-// other subtypes are deliberately never requested (no conversion policy).
+// ksSubtypePCM is KSDATAFORMAT_SUBTYPE_PCM (signed integer samples).
 var ksSubtypePCM = windows.GUID{Data1: 0x00000001, Data2: 0x0000, Data3: 0x0010, Data4: [8]byte{0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}}
+
+// ksSubtypeIEEEFloat is KSDATAFORMAT_SUBTYPE_IEEE_FLOAT (32-bit float samples).
+// Like the integer subtype it names an exact endpoint format: it is only ever
+// requested when the caller explicitly asks for float, never as a fallback the
+// mixer could convert to (the no-silent-conversion policy).
+var ksSubtypeIEEEFloat = windows.GUID{Data1: 0x00000003, Data2: 0x0000, Data3: 0x0010, Data4: [8]byte{0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}}
+
+// SampleFormat is the exclusive-mode sample format requested from the endpoint.
+// It pairs a bit depth with a KSDATAFORMAT subtype so the two can never drift
+// apart (e.g. "float" with a 16-bit depth). The public capture.Format maps onto
+// it in stream_windows.go.
+type SampleFormat int
+
+const (
+	SampleS16 SampleFormat = iota // signed 16-bit integer
+	SampleS32                     // signed 32-bit integer
+	SampleF32                     // 32-bit IEEE-754 float
+)
+
+// Bits returns the sample bit depth (wBitsPerSample).
+func (sf SampleFormat) Bits() int {
+	switch sf {
+	case SampleS16:
+		return 16
+	default: // SampleS32, SampleF32
+		return 32
+	}
+}
+
+// subtype returns the WAVEFORMATEXTENSIBLE SubFormat GUID for the sample kind.
+func (sf SampleFormat) subtype() windows.GUID {
+	if sf == SampleF32 {
+		return ksSubtypeIEEEFloat
+	}
+	return ksSubtypePCM
+}
+
+// String returns the short token matching the public Format ("s16"/"s32"/"f32").
+func (sf SampleFormat) String() string {
+	switch sf {
+	case SampleS16:
+		return "s16"
+	case SampleS32:
+		return "s32"
+	case SampleF32:
+		return "f32"
+	default:
+		return "unknown"
+	}
+}
 
 const (
 	wfTagExtensible = 0xFFFE // WAVE_FORMAT_EXTENSIBLE
@@ -77,9 +126,11 @@ func channelMask(channels int) uint32 {
 	}
 }
 
-// pcmFormat builds an integer-PCM WAVEFORMATEXTENSIBLE for the exact rate,
-// channel count, and bit depth. No float, no conversion (phase-1 policy).
-func pcmFormat(rate, channels, bits int) *waveFormatExtensible {
+// pcmFormat builds a WAVEFORMATEXTENSIBLE for the exact rate, channel count, and
+// sample format. The subtype (integer PCM or IEEE float) comes straight from sf,
+// so the endpoint is asked for that format exactly, with no conversion allowed.
+func pcmFormat(rate, channels int, sf SampleFormat) *waveFormatExtensible {
+	bits := sf.Bits()
 	block := channels * (bits / 8)
 	return &waveFormatExtensible{
 		wFormatTag:          wfTagExtensible,
@@ -91,7 +142,7 @@ func pcmFormat(rate, channels, bits int) *waveFormatExtensible {
 		cbSize:              22, // sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
 		wValidBitsPerSample: uint16(bits),
 		dwChannelMask:       channelMask(channels),
-		subFormat:           ksSubtypePCM,
+		subFormat:           sf.subtype(),
 	}
 }
 

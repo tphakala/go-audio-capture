@@ -104,6 +104,49 @@ func TestOpenReportsNegotiated(t *testing.T) {
 	}
 }
 
+func TestAlsaFormat(t *testing.T) {
+	tests := []struct {
+		f       Format
+		want    uint32
+		wantErr bool
+	}{
+		{FormatS16LE, alsa.FormatS16LE, false},
+		{FormatS32LE, alsa.FormatS32LE, false},
+		{FormatF32LE, alsa.FormatFloatLE, false},
+		{Format(99), 0, true},
+	}
+	for _, tt := range tests {
+		got, err := alsaFormat(tt.f)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("alsaFormat(%v) err = nil, want error", tt.f)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("alsaFormat(%v) = (%d, %v), want (%d, nil)", tt.f, got, err, tt.want)
+		}
+	}
+}
+
+// TestOpenFloat32Negotiated confirms Open accepts FormatF32LE end to end: it must
+// not error (which exercises alsaFormat's F32LE arm; a missing arm fails Open),
+// and the negotiated config echoes f32 at 4 bytes per sample.
+func TestOpenFloat32Negotiated(t *testing.T) {
+	defer swapOpenPCM(&fakePCM{readFn: func() (int, error) { return 0, nil }})()
+	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatF32LE})
+	if err != nil {
+		t.Fatalf("Open f32: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if got := s.Negotiated().Format; got != FormatF32LE {
+		t.Errorf("Negotiated.Format = %v, want f32", got)
+	}
+	if got := s.Negotiated().Format.BytesPerSample(); got != 4 {
+		t.Errorf("f32 BytesPerSample = %d, want 4", got)
+	}
+}
+
 func TestReadRecoversXrun(t *testing.T) {
 	calls := 0
 	f := &fakePCM{readFn: func() (int, error) {

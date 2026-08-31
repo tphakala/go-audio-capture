@@ -25,13 +25,13 @@ type fakeDevice struct {
 	started bool
 }
 
-func (f *fakeDevice) Negotiate(rate, channels, bits int) (wasapi.Negotiated, error) {
+func (f *fakeDevice) Negotiate(rate, channels int, sf wasapi.SampleFormat) (wasapi.Negotiated, error) {
 	if f.negErr != nil {
 		return wasapi.Negotiated{}, f.negErr
 	}
 	n := f.neg
 	if n.Rate == 0 {
-		n = wasapi.Negotiated{Rate: rate, Channels: channels, Bits: bits, PeriodFrames: 480, Periods: 1, BufferFrames: 480}
+		n = wasapi.Negotiated{Rate: rate, Channels: channels, Bits: sf.Bits(), PeriodFrames: 480, Periods: 1, BufferFrames: 480}
 	}
 	return n, nil
 }
@@ -149,6 +149,31 @@ func TestReadAfterCloseReturnsErrClosed(t *testing.T) {
 	}
 }
 
+func TestWaFormat(t *testing.T) {
+	tests := []struct {
+		f       Format
+		want    wasapi.SampleFormat
+		wantErr bool
+	}{
+		{FormatS16LE, wasapi.SampleS16, false},
+		{FormatS32LE, wasapi.SampleS32, false},
+		{FormatF32LE, wasapi.SampleF32, false},
+		{Format(99), 0, true},
+	}
+	for _, tt := range tests {
+		got, err := waFormat(tt.f)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("waFormat(%v) err = nil, want error", tt.f)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("waFormat(%v) = (%v, %v), want (%v, nil)", tt.f, got, err, tt.want)
+		}
+	}
+}
+
 func TestOpenRejectsBadConfig(t *testing.T) {
 	defer swapOpenDevice(&fakeDevice{readFn: func() (int, bool, error) { return 0, false, nil }})()
 	tests := []Config{
@@ -179,7 +204,7 @@ func TestOpenTranslatesNegotiateErrors(t *testing.T) {
 		},
 		{
 			"bad format",
-			&wasapi.BadFormatError{Rate: 48000, Channels: 1, Bits: 16},
+			&wasapi.BadFormatError{Rate: 48000, Channels: 1, Format: wasapi.SampleS16},
 			func(e error) bool {
 				var b *BadFormatError
 				return errors.As(e, &b) && b.Rate == 48000 && b.Channels == 1 && b.Format == FormatS16LE
