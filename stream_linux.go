@@ -45,7 +45,10 @@ type Stream struct {
 // Open configures and opens a capture stream. It negotiates the exact requested
 // rate (failing with *BadRateError otherwise), applies the 20 ms / 4-period
 // defaults, and returns a stream that is prepared but not yet started; call
-// Start before Read.
+// Start before Read. On failure it returns a typed error: *BadRateError for an
+// unsupported rate, *BadFormatError for an unsupported channel/format
+// combination, ErrDeviceInUse when another application holds the device, and
+// ErrDeviceGone when the device is missing or was removed.
 func Open(cfg Config) (*Stream, error) {
 	card, device, err := parseDeviceID(cfg.Device)
 	if err != nil {
@@ -72,12 +75,17 @@ func Open(cfg Config) (*Stream, error) {
 
 	p, err := openPCM(card, device)
 	if err != nil {
-		return nil, err
+		// A device that is absent or removed at open time fails here (the PCM
+		// node is missing, or the driver reports the card gone). Classify it the
+		// same way as a mid-stream loss so a caller can retire it with
+		// errors.Is(err, ErrDeviceGone), and a busy device as ErrDeviceInUse,
+		// matching what SupportedRates and the Windows Open path already do.
+		return nil, translateOpenError(err, cfg.Channels, cfg.Format)
 	}
 	n, err := p.Negotiate(cfg.Rate, cfg.Channels, format, periodFrames, periods)
 	if err != nil {
 		_ = p.Close()
-		return nil, translateBadRate(err)
+		return nil, translateOpenError(err, cfg.Channels, cfg.Format)
 	}
 	return &Stream{
 		pcm: p,
@@ -106,6 +114,12 @@ func (s *Stream) Start() error {
 		// A concurrent Close races the START ioctl to EBADF; report the close.
 		if s.closed.Load() || errors.Is(err, unix.EBADF) {
 			return ErrClosed
+		}
+		// A device unplugged in the window between Open and Start surfaces as
+		// ErrDeviceGone so a caller can classify a lost device with errors.Is at
+		// Start exactly as it can at Open and Read.
+		if isDeviceGoneErrno(err) {
+			return ErrDeviceGone
 		}
 		return err
 	}
@@ -206,12 +220,37 @@ func alsaFormat(f Format) (uint32, error) {
 	}
 }
 
-// translateBadRate converts the internal ALSA bad-rate error into the public
-// *BadRateError so callers never import internal/alsa.
-func translateBadRate(err error) error {
+// isDeviceGoneErrno reports whether err (or an error it wraps) is one of the
+// ALSA errnos that mean the device is missing or was removed: ENODEV, ENXIO, or
+// ENOENT. It is the single source of truth for that errno set, shared by Open,
+// Start, Read, and the capability query so the set cannot drift between them.
+func isDeviceGoneErrno(err error) bool {
+	return errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENOENT)
+}
+
+// translateOpenError converts the errors the open-and-negotiate path can return
+// into the public typed errors so callers never import internal/alsa: an
+// unsupported rate becomes *BadRateError, an unsupported channel/format
+// combination becomes *BadFormatError, a device held by another application
+// becomes ErrDeviceInUse, and a device that is missing or was removed becomes
+// ErrDeviceGone. channels and format come from the requested Config so the
+// public *BadFormatError carries them. The EBUSY and device-gone mapping mirrors
+// translateQueryError so Open and SupportedRates classify a busy or lost device
+// the same way. Anything else is returned unchanged.
+func translateOpenError(err error, channels int, format Format) error {
 	var bre *alsa.BadRateError
 	if errors.As(err, &bre) {
 		return &BadRateError{Requested: bre.Requested, Min: bre.Min, Max: bre.Max}
+	}
+	var bfe *alsa.BadFormatError
+	if errors.As(err, &bfe) {
+		return &BadFormatError{Channels: channels, Format: format}
+	}
+	if errors.Is(err, unix.EBUSY) {
+		return ErrDeviceInUse
+	}
+	if isDeviceGoneErrno(err) {
+		return ErrDeviceGone
 	}
 	return err
 }
@@ -223,10 +262,8 @@ func translateBadRate(err error) error {
 // mirrors translateQueryError so Read and SupportedRates report a lost device
 // the same way. Anything else is returned unchanged.
 func translateReadError(err error) error {
-	switch {
-	case errors.Is(err, unix.ENODEV), errors.Is(err, unix.ENXIO), errors.Is(err, unix.ENOENT):
+	if isDeviceGoneErrno(err) {
 		return ErrDeviceGone
-	default:
-		return err
 	}
+	return err
 }

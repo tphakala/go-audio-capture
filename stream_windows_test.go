@@ -17,12 +17,13 @@ var errUnclassifiedProbe = errors.New("wasapi: unclassified probe error")
 // fakeDevice implements the wasapiDevice seam so Open/Read/Close are testable
 // with no audio hardware, mirroring fakePCM on the Linux side.
 type fakeDevice struct {
-	neg     wasapi.Negotiated
-	negErr  error
-	readFn  func() (int, bool, error)
-	block   chan struct{} // closed by Close to unblock a parked Read
-	parked  chan struct{} // closed by readFn once it is about to park, if non-nil
-	started bool
+	neg      wasapi.Negotiated
+	negErr   error
+	readFn   func() (int, bool, error)
+	block    chan struct{} // closed by Close to unblock a parked Read
+	parked   chan struct{} // closed by readFn once it is about to park, if non-nil
+	started  bool
+	startErr error // when set, Start returns it
 }
 
 func (f *fakeDevice) Negotiate(rate, channels int, sf wasapi.SampleFormat) (wasapi.Negotiated, error) {
@@ -35,7 +36,7 @@ func (f *fakeDevice) Negotiate(rate, channels int, sf wasapi.SampleFormat) (wasa
 	}
 	return n, nil
 }
-func (f *fakeDevice) Start() error { f.started = true; return nil }
+func (f *fakeDevice) Start() error { f.started = true; return f.startErr }
 func (f *fakeDevice) Read(_ []byte) (frames int, discontinuity bool, err error) {
 	return f.readFn()
 }
@@ -185,6 +186,47 @@ func TestOpenRejectsBadConfig(t *testing.T) {
 		if _, err := Open(cfg); err == nil {
 			t.Errorf("Open(%+v) = nil error, want failure", cfg)
 		}
+	}
+}
+
+// TestStartTranslatesErrors covers issue #10 on Windows: Start must route its
+// error through the same classification as Open and Read, so an invalidated
+// endpoint becomes ErrDeviceGone and a concurrent-close signal becomes
+// ErrClosed, rather than leaking the raw internal/wasapi error.
+func TestStartTranslatesErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		startErr error
+		check    func(error) bool
+	}{
+		{
+			"device gone",
+			wasapi.ErrDeviceGone,
+			func(e error) bool { return errors.Is(e, ErrDeviceGone) },
+		},
+		{
+			"closed",
+			wasapi.ErrClosed,
+			func(e error) bool { return errors.Is(e, ErrClosed) },
+		},
+		{
+			"unclassified error passes through",
+			errUnclassifiedProbe,
+			func(e error) bool { return errors.Is(e, errUnclassifiedProbe) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer swapOpenDevice(&fakeDevice{startErr: tt.startErr})()
+			s, err := Open(Config{Device: "", Rate: 48000, Channels: 1, Format: FormatS16LE})
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer func() { _ = s.Close() }()
+			if err := s.Start(); err == nil || !tt.check(err) {
+				t.Errorf("Start with %v = %v, want translated public error", tt.startErr, err)
+			}
+		})
 	}
 }
 

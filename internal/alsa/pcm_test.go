@@ -52,6 +52,115 @@ func TestNegotiateRefusesBadRate(t *testing.T) {
 	}
 }
 
+func TestNegotiateRefusesBadFormat(t *testing.T) {
+	// The initial unconstrained HW_REFINE (which pins access/format/channels and
+	// leaves rate open) is rejected with EINVAL, meaning the device does not
+	// support this channel/format combo. Negotiate must surface a typed
+	// *BadFormatError, not the raw ioctl error, so the public layer can report
+	// it cleanly (this is the ZOOM AMS-24 symptom from issue #9: an unsupported
+	// combo leaked "alsa: HW_REFINE: invalid argument").
+	fake := func(_ int, req uintptr, _ unsafe.Pointer) error {
+		if req == iocHwRefine {
+			return unix.EINVAL
+		}
+		return nil
+	}
+	p := newPCM(-1, fake)
+	_, err := p.Negotiate(48000, 1, FormatS16LE, 960, 4)
+	var bfe *BadFormatError
+	if !errors.As(err, &bfe) {
+		t.Fatalf("Negotiate with refine EINVAL err = %v, want *BadFormatError", err)
+	}
+	if bfe.Channels != 1 || bfe.Format != FormatS16LE {
+		t.Errorf("BadFormatError = %+v, want {Channels:1, Format:%d}", bfe, FormatS16LE)
+	}
+}
+
+func TestNegotiateRefinePassesThroughDeviceGone(t *testing.T) {
+	// A device-gone errno at the initial refine (ENODEV/ENXIO/ENOENT) must NOT be
+	// relabelled a format error: it is disjoint from EINVAL and must pass through
+	// so the public layer can map it to ErrDeviceGone.
+	for _, errno := range []unix.Errno{unix.ENODEV, unix.ENXIO, unix.ENOENT} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			fake := func(_ int, req uintptr, _ unsafe.Pointer) error {
+				if req == iocHwRefine {
+					return errno
+				}
+				return nil
+			}
+			p := newPCM(-1, fake)
+			_, err := p.Negotiate(48000, 1, FormatS16LE, 960, 4)
+			var bfe *BadFormatError
+			if errors.As(err, &bfe) {
+				t.Fatalf("Negotiate with refine %v = %v, want it NOT a *BadFormatError", errno, err)
+			}
+			if !errors.Is(err, errno) {
+				t.Errorf("Negotiate with refine %v = %v, want it to unwrap to %v", errno, err, errno)
+			}
+		})
+	}
+}
+
+func TestNegotiateBadRateOnCommit(t *testing.T) {
+	// The rate is inside the reported [rlo, rhi] window so it passes the range
+	// check, but the exact HW_PARAMS commit is rejected with EINVAL (a discrete
+	// gap inside the window). Negotiate must report *BadRateError carrying the
+	// window bounds, not leak the raw HW_PARAMS errno.
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		switch req {
+		case iocHwRefine:
+			hw := (*HwParams)(arg)
+			setInterval(hw, ParamRate, 44100, 96000)
+			setInterval(hw, ParamPeriodSize, 16, 65536)
+			setInterval(hw, ParamPeriods, 2, 32)
+		case iocHwParams:
+			return unix.EINVAL
+		}
+		return nil
+	}
+	p := newPCM(-1, fake)
+	_, err := p.Negotiate(44101, 2, FormatS32LE, 882, 4)
+	var bre *BadRateError
+	if !errors.As(err, &bre) {
+		t.Fatalf("Negotiate with HW_PARAMS EINVAL err = %v, want *BadRateError", err)
+	}
+	if bre.Requested != 44101 || bre.Min != 44100 || bre.Max != 96000 {
+		t.Errorf("BadRateError = %+v, want {44101, 44100, 96000}", bre)
+	}
+}
+
+func TestNegotiateCommitPassesThroughDeviceGone(t *testing.T) {
+	// A device-gone errno at the HW_PARAMS commit (the rate cleared the window
+	// check, then the device vanished) must NOT be relabelled a bad rate: only
+	// EINVAL maps to *BadRateError there, so a device-gone errno passes through
+	// for the public layer to map to ErrDeviceGone. Mirrors the refine-time case.
+	for _, errno := range []unix.Errno{unix.ENODEV, unix.ENXIO, unix.ENOENT} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+				switch req {
+				case iocHwRefine:
+					hw := (*HwParams)(arg)
+					setInterval(hw, ParamRate, 44100, 96000)
+					setInterval(hw, ParamPeriodSize, 16, 65536)
+					setInterval(hw, ParamPeriods, 2, 32)
+				case iocHwParams:
+					return errno
+				}
+				return nil
+			}
+			p := newPCM(-1, fake)
+			_, err := p.Negotiate(48000, 2, FormatS32LE, 960, 4)
+			var bre *BadRateError
+			if errors.As(err, &bre) {
+				t.Fatalf("Negotiate with HW_PARAMS %v = %v, want it NOT a *BadRateError", errno, err)
+			}
+			if !errors.Is(err, errno) {
+				t.Errorf("Negotiate with HW_PARAMS %v = %v, want it to unwrap to %v", errno, err, errno)
+			}
+		})
+	}
+}
+
 func TestNegotiateSucceeds(t *testing.T) {
 	var swParamsCalled bool
 	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {

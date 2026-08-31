@@ -16,8 +16,8 @@ const (
 	// FormatF32LE is 32-bit IEEE-754 little-endian float PCM. It will be the
 	// native capture format on the planned macOS CoreAudio backend, and is
 	// accepted on Linux/Windows when the endpoint itself supports float (many do
-	// not, in which case Open fails rather than converting; on Windows the failure
-	// is a typed *BadFormatError, on Linux the raw ALSA format-negotiation error).
+	// not, in which case Open fails with a typed *BadFormatError rather than
+	// converting, on both Linux and Windows).
 	FormatF32LE
 )
 

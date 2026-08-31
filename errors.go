@@ -18,7 +18,10 @@ var ErrExclusiveNotAllowed = errors.New("capture: exclusive access disabled for 
 var ErrDeviceInUse = errors.New("capture: device is in use by another application")
 
 // ErrDeviceGone reports that the device disappeared (unplugged, disabled, or
-// otherwise invalidated) during use. Read returns it instead of hanging.
+// otherwise invalidated). Open, Start, and Read all return it when the device
+// is missing or removed, and SupportedRates returns it for a query against a
+// device that is gone, so a caller can retire the device with
+// errors.Is(err, ErrDeviceGone) at any point in the stream lifecycle.
 var ErrDeviceGone = errors.New("capture: device is gone")
 
 // ErrCapabilitiesUnsupported reports that device capability queries such as

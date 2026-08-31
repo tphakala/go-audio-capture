@@ -82,7 +82,16 @@ func (s *Stream) Start() error {
 	if s.closed.Load() {
 		return ErrClosed
 	}
-	return s.dev.Start()
+	if err := s.dev.Start(); err != nil {
+		// A concurrent Close surfaces as ErrClosed; an invalidated endpoint maps
+		// to ErrDeviceGone, mirroring Open and Read so a caller classifies a lost
+		// device the same way across the whole lifecycle.
+		if s.closed.Load() || errors.Is(err, wasapi.ErrClosed) {
+			return ErrClosed
+		}
+		return translateWASAPIError(err, s.cfg)
+	}
+	return nil
 }
 
 // Read fills buf with whole interleaved frames and returns the number of frames
