@@ -44,8 +44,10 @@ var standardRates = []int{
 //
 // If the device is held exclusively by another process the open itself fails
 // and the returned error is ErrDeviceInUse; a missing or removed device yields
-// ErrDeviceGone. In either case the caller should fall back to a static rate
-// list rather than treating the query as authoritative.
+// ErrDeviceGone; a channel count or format the device does not support at any
+// rate yields *BadFormatError. In the ErrDeviceInUse and ErrDeviceGone cases the
+// caller should fall back to a static rate list rather than treating the query
+// as authoritative.
 func SupportedRates(device string, channels int, format Format) (RateSupport, error) {
 	card, dev, err := parseDeviceID(device)
 	if err != nil {
@@ -86,7 +88,7 @@ func translateQueryError(err error) error {
 	switch {
 	case errors.Is(err, unix.EBUSY):
 		return ErrDeviceInUse
-	case errors.Is(err, unix.ENOENT), errors.Is(err, unix.ENODEV), errors.Is(err, unix.ENXIO):
+	case isDeviceGoneErrno(err):
 		return ErrDeviceGone
 	default:
 		return err

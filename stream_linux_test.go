@@ -50,6 +50,8 @@ func TestParseDeviceID(t *testing.T) {
 // fakePCM implements the pcm seam so Open/Read/Close are testable with no
 // hardware.
 type fakePCM struct {
+	negErr    error // when set, Negotiate returns it
+	startErr  error // when set, Start returns it
 	readFn    func() (int, error)
 	recoverFn func(error) error // overrides Recover when set
 	recovered int
@@ -57,12 +59,15 @@ type fakePCM struct {
 }
 
 func (f *fakePCM) Negotiate(rate, channels int, format uint32, periodFrames, periods int) (alsa.Negotiated, error) {
+	if f.negErr != nil {
+		return alsa.Negotiated{}, f.negErr
+	}
 	return alsa.Negotiated{
 		Rate: rate, Channels: channels, Format: format,
 		PeriodFrames: periodFrames, Periods: periods, BufferFrames: periodFrames * periods,
 	}, nil
 }
-func (f *fakePCM) Start() error                       { return nil }
+func (f *fakePCM) Start() error                       { return f.startErr }
 func (f *fakePCM) ReadI(_ []byte, _ int) (int, error) { return f.readFn() }
 func (f *fakePCM) Recover(err error) error {
 	if f.recoverFn != nil {
@@ -84,6 +89,14 @@ func (f *fakePCM) Close() error {
 func swapOpenPCM(p pcm) func() {
 	prev := openPCM
 	openPCM = func(_, _ int) (pcm, error) { return p, nil }
+	return func() { openPCM = prev }
+}
+
+// swapOpenPCMError makes openPCM itself fail (device absent, removed, or busy at
+// open time), exercising the open-failure arm of Open that a fake pcm cannot.
+func swapOpenPCMError(err error) func() {
+	prev := openPCM
+	openPCM = func(_, _ int) (pcm, error) { return nil, err }
 	return func() { openPCM = prev }
 }
 
@@ -280,6 +293,214 @@ func TestReadPassesThroughNonDeviceGoneError(t *testing.T) {
 	}
 	if !errors.Is(err, unix.EIO) {
 		t.Errorf("Read with EIO = %v, want it to unwrap to EIO", err)
+	}
+}
+
+// TestOpenMapsUnsupportedFormat covers the ZOOM AMS-24 symptom from issue #9:
+// when Negotiate rejects the channel/format combination (its initial HW_REFINE
+// EINVALs), Open must return a typed *BadFormatError carrying the requested
+// channels and format, not leak the raw "alsa: HW_REFINE: invalid argument".
+func TestOpenMapsUnsupportedFormat(t *testing.T) {
+	fp := &fakePCM{negErr: &alsa.BadFormatError{Channels: 1, Format: alsa.FormatS16LE}}
+	defer swapOpenPCM(fp)()
+	_, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatS16LE})
+	var bfe *BadFormatError
+	if !errors.As(err, &bfe) {
+		t.Fatalf("Open with unsupported format = %v, want *BadFormatError", err)
+	}
+	if bfe.Channels != 1 || bfe.Format != FormatS16LE || bfe.Rate != 0 {
+		t.Errorf("BadFormatError = %+v, want {Rate:0, Channels:1, Format:s16}", bfe)
+	}
+}
+
+// TestOpenMapsBadRate confirms the existing rate path still yields a public
+// *BadRateError after the translate function was broadened.
+func TestOpenMapsBadRate(t *testing.T) {
+	fp := &fakePCM{negErr: &alsa.BadRateError{Requested: 256000, Min: 44100, Max: 96000}}
+	defer swapOpenPCM(fp)()
+	_, err := Open(Config{Device: devID, Rate: 256000, Channels: 2, Format: FormatS32LE})
+	var bre *BadRateError
+	if !errors.As(err, &bre) {
+		t.Fatalf("Open with bad rate = %v, want *BadRateError", err)
+	}
+	if bre.Requested != 256000 || bre.Min != 44100 || bre.Max != 96000 {
+		t.Errorf("BadRateError = %+v, want {256000, 44100, 96000}", bre)
+	}
+}
+
+// TestOpenMapsDeviceGone covers a device removed between enumeration and Open:
+// a device-gone errno from Negotiate must surface as ErrDeviceGone (issue #10),
+// matching what Read and SupportedRates already do. Each errno is wrapped like
+// alsa's ioctlError to prove translation unwraps through the driver error.
+func TestOpenMapsDeviceGone(t *testing.T) {
+	for _, errno := range []unix.Errno{unix.ENODEV, unix.ENXIO, unix.ENOENT} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			fp := &fakePCM{negErr: &recoverError{errno}}
+			defer swapOpenPCM(fp)()
+			_, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+			if !errors.Is(err, ErrDeviceGone) {
+				t.Errorf("Open with %v = %v, want ErrDeviceGone", errno, err)
+			}
+		})
+	}
+}
+
+// TestOpenPassesThroughOtherError guards the other half of translateOpenError:
+// an error that is neither a bad rate, nor a bad format, nor device-gone (EIO is
+// a genuine fault on a present device) must surface unchanged, never relabelled.
+func TestOpenPassesThroughOtherError(t *testing.T) {
+	fp := &fakePCM{negErr: &recoverError{unix.EIO}}
+	defer swapOpenPCM(fp)()
+	_, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	if errors.Is(err, ErrDeviceGone) {
+		t.Errorf("Open with EIO = %v, want it passed through, not ErrDeviceGone", err)
+	}
+	if !errors.Is(err, unix.EIO) {
+		t.Errorf("Open with EIO = %v, want it to unwrap to EIO", err)
+	}
+}
+
+// TestOpenMapsOpenTimeDeviceGone covers a device that is absent or removed at
+// OPEN time (the PCM node is missing or the driver reports the card gone): the
+// failure comes from openPCM, not Negotiate, and must still surface as
+// ErrDeviceGone so a caller can classify it the same way as a mid-stream loss.
+// This is the open-failure path that the Negotiate-injected tests cannot reach.
+func TestOpenMapsOpenTimeDeviceGone(t *testing.T) {
+	for _, errno := range []unix.Errno{unix.ENODEV, unix.ENXIO, unix.ENOENT} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			defer swapOpenPCMError(&recoverError{errno})()
+			_, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+			if !errors.Is(err, ErrDeviceGone) {
+				t.Errorf("Open with openPCM %v = %v, want ErrDeviceGone", errno, err)
+			}
+		})
+	}
+}
+
+// TestOpenMapsOpenTimeBusy covers a device held exclusively by another
+// application at open time: openPCM fails with EBUSY, which Open must classify
+// as ErrDeviceInUse, matching what SupportedRates already returns for the same
+// condition.
+func TestOpenMapsOpenTimeBusy(t *testing.T) {
+	defer swapOpenPCMError(&recoverError{unix.EBUSY})()
+	_, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	if !errors.Is(err, ErrDeviceInUse) {
+		t.Errorf("Open with openPCM EBUSY = %v, want ErrDeviceInUse", err)
+	}
+}
+
+// TestOpenPassesThroughOpenTimeOtherError guards the open-failure arm's default:
+// a non-classifiable open error (EACCES after both O_RDWR and O_RDONLY fail) must
+// surface unchanged, not be relabelled device-gone or device-in-use.
+func TestOpenPassesThroughOpenTimeOtherError(t *testing.T) {
+	defer swapOpenPCMError(&recoverError{unix.EACCES})()
+	_, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	if errors.Is(err, ErrDeviceGone) || errors.Is(err, ErrDeviceInUse) {
+		t.Errorf("Open with openPCM EACCES = %v, want it passed through", err)
+	}
+	if !errors.Is(err, unix.EACCES) {
+		t.Errorf("Open with openPCM EACCES = %v, want it to unwrap to EACCES", err)
+	}
+}
+
+// TestStartSucceeds covers Start's success path (no injected error): it must
+// return nil and not be tripped by the error-classification arms.
+func TestStartSucceeds(t *testing.T) {
+	defer swapOpenPCM(&fakePCM{})()
+	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Start(); err != nil {
+		t.Errorf("Start = %v, want nil", err)
+	}
+}
+
+// TestStartAfterCloseReturnsErrClosed covers Start's top closed-guard: starting a
+// closed stream returns ErrClosed without touching the device.
+func TestStartAfterCloseReturnsErrClosed(t *testing.T) {
+	defer swapOpenPCM(&fakePCM{startErr: &recoverError{unix.ENODEV}})()
+	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_ = s.Close()
+	if err := s.Start(); !errors.Is(err, ErrClosed) {
+		t.Errorf("Start after Close = %v, want ErrClosed (even with a device-gone startErr)", err)
+	}
+}
+
+// TestStartMapsDeviceGone covers a device unplugged between Open and Start: the
+// device-gone errno from the START ioctl must surface as ErrDeviceGone (issue
+// #10) so the whole lifecycle classifies a lost device the same way.
+func TestStartMapsDeviceGone(t *testing.T) {
+	for _, errno := range []unix.Errno{unix.ENODEV, unix.ENXIO, unix.ENOENT} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			fp := &fakePCM{startErr: &recoverError{errno}}
+			defer swapOpenPCM(fp)()
+			s, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer func() { _ = s.Close() }()
+			if err := s.Start(); !errors.Is(err, ErrDeviceGone) {
+				t.Errorf("Start with %v = %v, want ErrDeviceGone", errno, err)
+			}
+		})
+	}
+}
+
+// TestStartMapsEBADFToErrClosed keeps the concurrent-Close race: an EBADF from
+// START (Close won the fd) is reported as ErrClosed, not a raw errno.
+func TestStartMapsEBADFToErrClosed(t *testing.T) {
+	fp := &fakePCM{startErr: &recoverError{unix.EBADF}}
+	defer swapOpenPCM(fp)()
+	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Start(); !errors.Is(err, ErrClosed) {
+		t.Errorf("Start with EBADF = %v, want ErrClosed", err)
+	}
+}
+
+// TestStartPassesThroughOtherError guards Start's default arm: a non-device-gone,
+// non-EBADF error (EIO on a present device) must surface unchanged.
+func TestStartPassesThroughOtherError(t *testing.T) {
+	fp := &fakePCM{startErr: &recoverError{unix.EIO}}
+	defer swapOpenPCM(fp)()
+	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	err = s.Start()
+	if errors.Is(err, ErrDeviceGone) || errors.Is(err, ErrClosed) {
+		t.Errorf("Start with EIO = %v, want it passed through", err)
+	}
+	if !errors.Is(err, unix.EIO) {
+		t.Errorf("Start with EIO = %v, want it to unwrap to EIO", err)
+	}
+}
+
+// TestIsDeviceGoneErrno pins the shared errno set directly: the three device-gone
+// codes match (bare and wrapped), and a present-device fault (EIO) does not.
+func TestIsDeviceGoneErrno(t *testing.T) {
+	for _, errno := range []unix.Errno{unix.ENODEV, unix.ENXIO, unix.ENOENT} {
+		if !isDeviceGoneErrno(errno) {
+			t.Errorf("isDeviceGoneErrno(%v) = false, want true", errno)
+		}
+		if !isDeviceGoneErrno(&recoverError{errno}) {
+			t.Errorf("isDeviceGoneErrno(wrapped %v) = false, want true", errno)
+		}
+	}
+	if isDeviceGoneErrno(unix.EIO) {
+		t.Error("isDeviceGoneErrno(EIO) = true, want false")
+	}
+	if isDeviceGoneErrno(nil) {
+		t.Error("isDeviceGoneErrno(nil) = true, want false")
 	}
 }
 

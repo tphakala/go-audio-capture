@@ -73,6 +73,21 @@ func (e *BadRateError) Error() string {
 	return fmt.Sprintf("alsa: sample rate %d Hz not supported (hardware range %d..%d Hz)", e.Requested, e.Min, e.Max)
 }
 
+// BadFormatError reports that the hardware does not support the requested
+// access/format/channel combination: the initial HW_REFINE, which pins those
+// and leaves the rate open, was rejected. It is distinct from BadRateError (an
+// otherwise-supported format at an unsupported rate) so the public layer can
+// surface the right typed error instead of leaking the raw ioctl string. Format
+// is the SNDRV_PCM_FORMAT_* id, not the public capture.Format.
+type BadFormatError struct {
+	Channels int
+	Format   uint32
+}
+
+func (e *BadFormatError) Error() string {
+	return fmt.Sprintf("alsa: %d-channel format id %d not supported", e.Channels, e.Format)
+}
+
 // ioctlError wraps an errno with the name of the ioctl that failed, so callers
 // never see a bare "invalid argument".
 type ioctlError struct {
@@ -172,7 +187,15 @@ func (p *PCM) Negotiate(rate, channels int, format uint32, periodFrames, periods
 	hw.SetIntervalExact(ParamChannels, uint32(channels))
 
 	// Discover the supported rate range for this format/channel/access combo.
+	// The refine pins access, format, subformat, and channels and leaves rate
+	// open, so an EINVAL here means the hardware rejects that combination
+	// outright (not a rate): report it as a typed format error rather than
+	// leaking the raw ioctl string. Device-gone errnos (ENODEV/ENXIO/ENOENT) are
+	// disjoint from EINVAL and pass through unchanged for the caller to classify.
 	if err := p.refine(&hw); err != nil {
+		if errors.Is(err, unix.EINVAL) {
+			return Negotiated{}, &BadFormatError{Channels: channels, Format: format}
+		}
 		return Negotiated{}, err
 	}
 	rlo, rhi := hw.Interval(ParamRate)
@@ -189,7 +212,15 @@ func (p *PCM) Negotiate(rate, channels int, format uint32, periodFrames, periods
 	hw.SetIntervalExact(ParamPeriodSize, clampU32(uint32(periodFrames), plo, phi))
 	nlo, nhi := hw.Interval(ParamPeriods)
 	hw.SetIntervalExact(ParamPeriods, clampU32(uint32(periods), nlo, nhi))
+	// The rate already passed the [rlo, rhi] window check, so an EINVAL at commit
+	// means the exact rate falls in a discrete gap inside that window (or, rarely,
+	// the clamped period geometry was refused). The library surfaces no
+	// period-geometry error and a discrete-rate gap is the dominant cause, so
+	// report a bad rate rather than leaking the raw HW_PARAMS errno.
 	if err := p.hwParams(&hw); err != nil {
+		if errors.Is(err, unix.EINVAL) {
+			return Negotiated{}, &BadRateError{Requested: rate, Min: int(rlo), Max: int(rhi)}
+		}
 		return Negotiated{}, err
 	}
 
