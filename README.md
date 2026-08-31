@@ -149,13 +149,3 @@ Caveats: these numbers are one machine, one device, at 48 kHz. They do not cover
 ```
 task check   # build (amd64 + arm64, CGO off), vet, lint, gofmt, race tests
 ```
-
-## Status
-
-Design notes, prior-art research, and phase plans live in the issue tracker, not in the repo:
-
-- #1 Feasibility study and prior art research
-- #2 Phase 1: public API design (capture only)
-- #3 Phase 1: Linux ALSA capture backend via kernel ioctl
-- #4 Phase 2: Windows WASAPI capture backend
-- #5 Phase 3: macOS CoreAudio capture backend via purego
