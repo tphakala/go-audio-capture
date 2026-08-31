@@ -20,11 +20,24 @@ type fakeRatePCM struct {
 	gotFormat  uint32
 	gotCands   []int
 	closeCalls int
+	// verifiable is the set of rates VerifyRate reports as truly committable;
+	// verifyErr, when set, makes every VerifyRate call fail with it.
+	verifiable map[int]bool
+	verifyErr  error
+	gotVerify  []int
 }
 
 func (f *fakeRatePCM) SupportedRates(channels int, format uint32, candidates []int) (rates []int, lo, hi int, err error) {
 	f.gotCh, f.gotFormat, f.gotCands = channels, format, candidates
 	return f.rates, f.lo, f.hi, f.ratesErr
+}
+
+func (f *fakeRatePCM) VerifyRate(_ int, _ uint32, rate int) (bool, error) {
+	f.gotVerify = append(f.gotVerify, rate)
+	if f.verifyErr != nil {
+		return false, f.verifyErr
+	}
+	return f.verifiable[rate], nil
 }
 
 // errShouldNotOpen lets the "unreachable after t.Fatal" seams satisfy the
@@ -68,6 +81,76 @@ func TestSupportedRatesHappyPath(t *testing.T) {
 	}
 	if fake.closeCalls != 1 {
 		t.Errorf("Close called %d times, want 1", fake.closeCalls)
+	}
+}
+
+func TestSupportedRatesVerifiedDropsRefineLie(t *testing.T) {
+	// Refine advertises 48000 and 384000; only 384000 actually commits (the
+	// AudioMoth over-report). The verified probe must drop 48000.
+	fake := &fakeRatePCM{
+		rates:      []int{48000, 384000},
+		lo:         48000,
+		hi:         384000,
+		verifiable: map[int]bool{384000: true},
+	}
+	withOpenRatePCM(t, func(int, int) (ratePCM, error) { return fake, nil })
+
+	got, err := SupportedRatesVerified("hw:2,0", 1, FormatS32LE)
+	if err != nil {
+		t.Fatalf("SupportedRatesVerified: %v", err)
+	}
+	want := RateSupport{Rates: []int{384000}, Min: 48000, Max: 384000}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("RateSupport = %+v, want %+v", got, want)
+	}
+	// Every advertised rate must have been HW_PARAMS-verified.
+	if !reflect.DeepEqual(fake.gotVerify, []int{48000, 384000}) {
+		t.Errorf("verified rates = %v, want [48000 384000]", fake.gotVerify)
+	}
+}
+
+func TestSupportedRatesVerifiedEmptyAdvertisedSkipsProbe(t *testing.T) {
+	// Nothing advertised: return the empty result without any HW_PARAMS probe.
+	fake := &fakeRatePCM{rates: nil, lo: 500000, hi: 768000}
+	withOpenRatePCM(t, func(int, int) (ratePCM, error) { return fake, nil })
+
+	got, err := SupportedRatesVerified("hw:2,0", 1, FormatS32LE)
+	if err != nil {
+		t.Fatalf("SupportedRatesVerified: %v", err)
+	}
+	if len(got.Rates) != 0 || got.Min != 500000 || got.Max != 768000 {
+		t.Errorf("RateSupport = %+v, want empty rates with window [500000, 768000]", got)
+	}
+	if len(fake.gotVerify) != 0 {
+		t.Errorf("VerifyRate called %v, want none", fake.gotVerify)
+	}
+}
+
+func TestSupportedRatesVerifiedSurfacesVerifyError(t *testing.T) {
+	// A real error from the HW_PARAMS pass (device vanished) surfaces as a typed
+	// error, not a silently truncated list.
+	fake := &fakeRatePCM{rates: []int{48000}, lo: 48000, hi: 48000, verifyErr: unix.ENODEV}
+	withOpenRatePCM(t, func(int, int) (ratePCM, error) { return fake, nil })
+
+	_, err := SupportedRatesVerified("hw:0,0", 1, FormatS32LE)
+	if !errors.Is(err, ErrDeviceGone) {
+		t.Fatalf("err = %v, want ErrDeviceGone", err)
+	}
+}
+
+func TestSupportedRatesVerifiedPropagatesRefinePassError(t *testing.T) {
+	// If the refine pass itself fails (device busy), the verified probe returns
+	// that error without attempting any HW_PARAMS commit.
+	fake := &fakeRatePCM{ratesErr: &BadFormatError{Channels: 1, Format: FormatS32LE}}
+	withOpenRatePCM(t, func(int, int) (ratePCM, error) { return fake, nil })
+
+	_, err := SupportedRatesVerified("hw:0,0", 1, FormatS32LE)
+	var bfe *BadFormatError
+	if !errors.As(err, &bfe) {
+		t.Fatalf("err = %v, want *BadFormatError", err)
+	}
+	if len(fake.gotVerify) != 0 {
+		t.Errorf("VerifyRate called %v, want none", fake.gotVerify)
 	}
 }
 

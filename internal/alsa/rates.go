@@ -89,3 +89,75 @@ func (p *PCM) SupportedRates(channels int, format uint32, candidates []int) (rat
 func (p *PCM) refineProbe(hw *HwParams) error {
 	return p.guardedIoctl(iocHwRefine, unsafe.Pointer(hw))
 }
+
+// VerifyRate reports whether the device can actually COMMIT to the exact rate,
+// using HW_PARAMS rather than HW_REFINE alone. Some drivers (notably USB Audio
+// Class devices that advertise a continuous rate window) accept a rate at
+// HW_REFINE that HW_PARAMS then rejects, because only the commit resolves the
+// true discrete or firmware-fixed rate. SupportedRates, which is refine-only,
+// therefore over-reports on such devices; VerifyRate is the authoritative check
+// a caller uses when it must not offer a rate the hardware cannot deliver.
+//
+// It refines once to learn the rate window, pins the exact rate, refines AGAIN
+// so the period/buffer bounds are the ones valid at that rate (a high rate can
+// shrink the maximum period), pins the geometry to each refined interval's lower
+// bound (which the driver guarantees is a valid discrete choice), and commits
+// HW_PARAMS. A committed rate equal to the request means supported (true, nil).
+// An EINVAL at refine (the channel/format combo is unsupported) or at commit (a
+// discrete-rate gap, or a refine lie), an emptied rate interval, or a driver that
+// silently substitutes a different rate all mean unsupported (false, nil). Any
+// other errno is a real device error and is returned.
+//
+// HW_PARAMS moves the stream to the SETUP state, so a caller verifying several
+// rates must use a fresh fd per rate. Closing from SETUP is safe and frees the
+// kernel buffers HW_PARAMS allocated; the kernel runs hw_free on release.
+func (p *PCM) VerifyRate(channels int, format uint32, rate int) (bool, error) {
+	var hw HwParams
+	hw.FillAny()
+	hw.SetMask(ParamAccess, AccessRWInterleaved)
+	hw.SetMask(ParamFormat, uint(format))
+	hw.SetMask(ParamSubformat, SubformatSTD)
+	hw.SetIntervalExact(ParamChannels, uint32(channels))
+
+	// First refine: learn the supported rate window for this format/channel combo.
+	if err := p.refine(&hw); err != nil {
+		if errors.Is(err, unix.EINVAL) {
+			return false, nil // channel/format combo unsupported: rate cannot be verified
+		}
+		return false, err
+	}
+	if hw.IntervalEmpty(ParamRate) {
+		return false, nil // driver signalled an unsatisfiable combo without EINVAL
+	}
+	rlo, rhi := hw.Interval(ParamRate)
+	if uint32(rate) < rlo || uint32(rate) > rhi {
+		return false, nil // outside the reported window
+	}
+
+	// Pin the exact rate and refine again so the period/buffer bounds reflect this
+	// rate. Then pin the geometry to each interval's lower bound: an arbitrary
+	// constant risks a spurious EINVAL on a device with strict discrete period
+	// sizes, but the interval's own lower bound is always a valid choice.
+	hw.SetIntervalExact(ParamRate, uint32(rate))
+	if err := p.refine(&hw); err != nil {
+		if errors.Is(err, unix.EINVAL) {
+			return false, nil
+		}
+		return false, err
+	}
+	plo, _ := hw.Interval(ParamPeriodSize)
+	hw.SetIntervalExact(ParamPeriodSize, plo)
+	nlo, _ := hw.Interval(ParamPeriods)
+	hw.SetIntervalExact(ParamPeriods, nlo)
+
+	if err := p.hwParams(&hw); err != nil {
+		if errors.Is(err, unix.EINVAL) {
+			return false, nil // the driver accepted this rate at refine but cannot commit it
+		}
+		return false, err
+	}
+	// A driver may commit successfully yet substitute a different rate; only an
+	// exact match proves the hardware honors the request.
+	got, _ := hw.Interval(ParamRate)
+	return got == uint32(rate), nil
+}

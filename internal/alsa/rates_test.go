@@ -147,3 +147,124 @@ func TestSupportedRatesEmptyWhenNoneMatch(t *testing.T) {
 		t.Errorf("range = [%d, %d], want [500000, 768000]", lo, hi)
 	}
 }
+
+// fakeCommitDevice models a device that advertises a continuous rate window at
+// HW_REFINE but only actually COMMITS the rates in committable at HW_PARAMS. This
+// is the USB Audio Class failure mode (e.g. an AudioMoth advertising [48000,
+// 384000] but delivering only 384000) that refine-only probing cannot detect.
+func fakeCommitDevice(rangeLo, rangeHi uint32, committable map[uint32]bool) ioctlFunc {
+	return func(_ int, req uintptr, arg unsafe.Pointer) error {
+		hw := (*HwParams)(arg)
+		switch req {
+		case iocHwRefine:
+			// A refine reports the advertised rate window when rate is open, and
+			// keeps a pinned rate (a refine narrows, never widens, a pin). It also
+			// resolves a valid period/buffer geometry the caller can pin to.
+			if lo, hi := hw.Interval(ParamRate); lo != hi {
+				setInterval(hw, ParamRate, rangeLo, rangeHi)
+			}
+			setInterval(hw, ParamPeriodSize, 64, 8192)
+			setInterval(hw, ParamPeriods, 2, 32)
+			return nil
+		case iocHwParams:
+			lo, hi := hw.Interval(ParamRate)
+			if lo != hi { // a commit must pin an exact rate
+				return unix.EINVAL
+			}
+			if !committable[lo] { // advertised at refine, rejected at commit
+				return unix.EINVAL
+			}
+			return nil // keep [lo, lo]; the commit succeeds
+		default:
+			return nil
+		}
+	}
+}
+
+func TestVerifyRateRejectsRefineOnlyRate(t *testing.T) {
+	// AudioMoth-like: refine advertises [48000, 384000] but only 384000 commits.
+	// VerifyRate must reject 48000 (a refine lie) and accept 384000.
+	committable := map[uint32]bool{384000: true}
+
+	p := newPCM(-1, fakeCommitDevice(48000, 384000, committable))
+	if ok, err := p.VerifyRate(1, FormatS32LE, 48000); err != nil || ok {
+		t.Fatalf("VerifyRate(48000) = %v, %v; want false, nil", ok, err)
+	}
+	p2 := newPCM(-1, fakeCommitDevice(48000, 384000, committable))
+	if ok, err := p2.VerifyRate(1, FormatS32LE, 384000); err != nil || !ok {
+		t.Fatalf("VerifyRate(384000) = %v, %v; want true, nil", ok, err)
+	}
+}
+
+func TestVerifyRateOutsideWindow(t *testing.T) {
+	// A candidate below the advertised window never reaches HW_PARAMS.
+	p := newPCM(-1, fakeCommitDevice(48000, 384000, map[uint32]bool{384000: true}))
+	if ok, err := p.VerifyRate(1, FormatS32LE, 8000); err != nil || ok {
+		t.Fatalf("VerifyRate(8000) = %v, %v; want false, nil", ok, err)
+	}
+}
+
+func TestVerifyRatePropagatesRealError(t *testing.T) {
+	// A non-EINVAL commit error (the device vanished mid-probe) surfaces rather
+	// than being read as "unsupported".
+	sentinel := unix.ENODEV
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		hw := (*HwParams)(arg)
+		switch req {
+		case iocHwRefine:
+			setInterval(hw, ParamRate, 48000, 384000)
+			return nil
+		case iocHwParams:
+			return sentinel
+		default:
+			return nil
+		}
+	}
+	p := newPCM(-1, fake)
+	if _, err := p.VerifyRate(1, FormatS32LE, 48000); !errors.Is(err, sentinel) {
+		t.Fatalf("VerifyRate err = %v, want ENODEV", err)
+	}
+}
+
+func TestVerifyRateRejectsSilentSubstitution(t *testing.T) {
+	// A driver that commits successfully but substitutes a different rate than
+	// requested must be rejected: only an exact match proves the rate is honored.
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		hw := (*HwParams)(arg)
+		switch req {
+		case iocHwRefine:
+			if lo, hi := hw.Interval(ParamRate); lo != hi {
+				setInterval(hw, ParamRate, 44100, 48000)
+			}
+			setInterval(hw, ParamPeriodSize, 64, 8192)
+			setInterval(hw, ParamPeriods, 2, 32)
+			return nil
+		case iocHwParams:
+			// Commit succeeds but the hardware forces 44100 regardless of request.
+			setInterval(hw, ParamRate, 44100, 44100)
+			return nil
+		default:
+			return nil
+		}
+	}
+	p := newPCM(-1, fake)
+	if ok, err := p.VerifyRate(1, FormatS16LE, 48000); err != nil || ok {
+		t.Fatalf("VerifyRate(48000 substituted to 44100) = %v, %v; want false, nil", ok, err)
+	}
+}
+
+func TestVerifyRateRejectsEmptyRateInterval(t *testing.T) {
+	// A driver that returns success from the first refine but empties the rate
+	// interval (an unsatisfiable combo signalled without EINVAL) is unsupported.
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		if req == iocHwRefine {
+			hw := (*HwParams)(arg)
+			hw.Intervals[ParamRate-paramFirstInterval] = Interval{Flags: intervalEmpty}
+		}
+		return nil
+	}
+	p := newPCM(-1, fake)
+	if ok, err := p.VerifyRate(1, FormatS16LE, 48000); err != nil || ok {
+		t.Fatalf("VerifyRate(empty interval) = %v, %v; want false, nil", ok, err)
+	}
+}
