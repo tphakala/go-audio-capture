@@ -14,7 +14,9 @@ import (
 
 // Devices enumerates capture-capable PCM devices from /proc/asound. A device
 // appears when its card has a capture PCM node (card{C}/pcm{D}c); playback-only
-// cards are skipped.
+// cards are skipped. The result is a point-in-time snapshot: there is no
+// appear/disappear event, so a caller that hot-adds devices as hardware is
+// plugged in must poll Devices (or watch /dev/snd) itself.
 func Devices() ([]DeviceInfo, error) {
 	return devicesFrom("/proc/asound")
 }

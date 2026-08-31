@@ -114,8 +114,13 @@ func (s *Stream) Start() error {
 
 // Read fills buf with whole interleaved frames and returns the number of frames
 // read. It blocks until at least one period is available. An overrun (xrun) is
-// recovered internally (the counter is bumped and the read retried); Read only
-// returns an error when the stream is closed (ErrClosed) or the device is gone.
+// recovered internally (the counter is bumped and the read retried). Read
+// returns ErrClosed when the stream is closed and ErrDeviceGone when the device
+// disappears (e.g. a USB capture device unplugged mid-stream); any other
+// unrecoverable error is returned unchanged. Any returned error leaves the
+// stream unusable (a short read, fewer frames than requested, is not an error and
+// returns a nil error): the caller must Close it (Read does not release the
+// device fd on its own) and, to resume, Open a new stream.
 func (s *Stream) Read(buf []byte) (int, error) {
 	if s.closed.Load() {
 		return 0, ErrClosed
@@ -143,7 +148,10 @@ func (s *Stream) Read(buf []byte) (int, error) {
 			if s.closed.Load() || errors.Is(rerr, unix.EBADF) {
 				return 0, ErrClosed
 			}
-			return 0, rerr // unrecoverable: Recover returns the error unchanged
+			// Unrecoverable: Recover returns the error unchanged. Map a
+			// disappeared device onto ErrDeviceGone so a caller can classify a
+			// surprise unplug with errors.Is instead of matching bare errnos.
+			return 0, translateReadError(rerr)
 		}
 		s.xruns.Add(1)
 	}
@@ -206,4 +214,19 @@ func translateBadRate(err error) error {
 		return &BadRateError{Requested: bre.Requested, Min: bre.Min, Max: bre.Max}
 	}
 	return err
+}
+
+// translateReadError maps the raw errnos an unrecoverable capture read can hit
+// onto the package's typed errors, so a caller never imports internal/alsa or
+// matches bare errnos to notice a disconnect. A device that disappeared
+// (unplugged, disabled, or otherwise invalidated) becomes ErrDeviceGone; this
+// mirrors translateQueryError so Read and SupportedRates report a lost device
+// the same way. Anything else is returned unchanged.
+func translateReadError(err error) error {
+	switch {
+	case errors.Is(err, unix.ENODEV), errors.Is(err, unix.ENXIO), errors.Is(err, unix.ENOENT):
+		return ErrDeviceGone
+	default:
+		return err
+	}
 }
