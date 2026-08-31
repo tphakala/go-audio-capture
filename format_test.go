@@ -31,6 +31,44 @@ func TestFormatIsFloat(t *testing.T) {
 	}
 }
 
+func TestParseFormat(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    Format
+		wantErr bool
+	}{
+		{"s16", FormatS16LE, false},
+		{"s32", FormatS32LE, false},
+		{"f32", FormatF32LE, false},
+		{"", 0, true},
+		{"u8", 0, true},
+		{"S16", 0, true}, // case-sensitive: only the lowercase token parses
+	}
+	for _, tt := range tests {
+		got, err := ParseFormat(tt.in)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("ParseFormat(%q) err = nil, want error", tt.in)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("ParseFormat(%q) = (%v, %v), want (%v, nil)", tt.in, got, err, tt.want)
+		}
+	}
+}
+
+// TestParseFormatRoundTrip pins that ParseFormat is the inverse of String for
+// every real format, so the two token maps cannot silently drift apart.
+func TestParseFormatRoundTrip(t *testing.T) {
+	for _, f := range []Format{FormatS16LE, FormatS32LE, FormatF32LE} {
+		got, err := ParseFormat(f.String())
+		if err != nil || got != f {
+			t.Errorf("ParseFormat(%q) = (%v, %v), want (%v, nil)", f.String(), got, err, f)
+		}
+	}
+}
+
 func TestFormatString(t *testing.T) {
 	tests := []struct {
 		f    Format
