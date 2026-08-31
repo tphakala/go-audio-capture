@@ -96,18 +96,18 @@ func Open(id string) (*Client, error) {
 }
 
 // Negotiate configures exclusive-mode capture at the exact rate, channel count,
-// and bit depth, or fails with a typed error (*BadRateError for an unsupported
+// and sample format, or fails with a typed error (*BadRateError for an unsupported
 // rate, *BadFormatError for an unsupported channel/format combo, or a sentinel-
 // wrapped HRESULT for exclusive-disallowed / device-in-use / device-gone). On
 // success the endpoint is initialized event-driven and prepared; call Start. On
 // error the Client may hold partially initialized state; the caller must still
 // call Close (idempotent) to release it. The sole caller (the public Stream)
 // does this.
-func (c *Client) Negotiate(rate, channels, bits int) (Negotiated, error) {
-	format := pcmFormat(rate, channels, bits)
+func (c *Client) Negotiate(rate, channels int, sf SampleFormat) (Negotiated, error) {
+	format := pcmFormat(rate, channels, sf)
 	if hr := c.isFormatSupported(format); hr != sOK {
 		if hr == hrUnsupportedFormat {
-			return Negotiated{}, c.classifyUnsupported(rate, channels, bits)
+			return Negotiated{}, c.classifyUnsupported(rate, channels, sf)
 		}
 		return Negotiated{}, &hresultError{Op: "IsFormatSupported", HR: hr}
 	}
@@ -122,7 +122,7 @@ func (c *Client) Negotiate(rate, channels, bits int) (Negotiated, error) {
 		if err := c.reactivate(); err != nil {
 			return Negotiated{}, err
 		}
-		format = pcmFormat(rate, channels, bits)
+		format = pcmFormat(rate, channels, sf)
 		hr = c.initialize(format, dur)
 	}
 	if hr.failed() {
@@ -151,21 +151,21 @@ func (c *Client) Negotiate(rate, channels, bits int) (Negotiated, error) {
 
 	bufFrames := int(c.bufferFrames())
 	c.neg = Negotiated{
-		Rate: rate, Channels: channels, Bits: bits,
+		Rate: rate, Channels: channels, Bits: sf.Bits(),
 		PeriodFrames: bufFrames, Periods: 1, BufferFrames: bufFrames,
 	}
 	return c.neg, nil
 }
 
 // classifyUnsupported turns an AUDCLNT_E_UNSUPPORTED_FORMAT into a *BadRateError
-// or *BadFormatError by probing the same channel/bit combo across the standard
+// or *BadFormatError by probing the same channel/format combo across the standard
 // rate ladder: if some rate works, the requested rate was the problem (and the
 // working rates bound the range); if none works, the channel/format combo is
 // unsupported.
-func (c *Client) classifyUnsupported(rate, channels, bits int) error {
+func (c *Client) classifyUnsupported(rate, channels int, sf SampleFormat) error {
 	lo, hi := 0, 0
 	for _, r := range standardRates {
-		if c.isFormatSupported(pcmFormat(r, channels, bits)) == sOK {
+		if c.isFormatSupported(pcmFormat(r, channels, sf)) == sOK {
 			if lo == 0 || r < lo {
 				lo = r
 			}
@@ -175,7 +175,7 @@ func (c *Client) classifyUnsupported(rate, channels, bits int) error {
 		}
 	}
 	if hi == 0 {
-		return &BadFormatError{Rate: rate, Channels: channels, Bits: bits}
+		return &BadFormatError{Rate: rate, Channels: channels, Format: sf}
 	}
 	return &BadRateError{Requested: rate, Min: lo, Max: hi}
 }

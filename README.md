@@ -27,6 +27,10 @@ miniaudio has served well, but the cgo boundary keeps costing debugging time: AL
 
 Non-goals: playback, mobile platforms, full miniaudio parity, pro-audio latency.
 
+### Sample formats
+
+`FormatS16LE` and `FormatS32LE` (signed 16- and 32-bit little-endian integer) and `FormatF32LE` (32-bit IEEE-754 little-endian float) are the supported capture formats. As with the sample rate, the requested format is negotiated with the hardware exactly or `Open` fails; there is no silent conversion. Float is the native format on macOS CoreAudio (the reason it exists here); on Linux `hw:` devices and Windows exclusive endpoints it is accepted only when the hardware itself offers float, which many do not.
+
 ## Phase 1: Linux ALSA
 
 The Linux backend talks directly to the ALSA PCM character devices under `/dev/snd` via kernel ioctls, with no dependency on libasound. This is `hw:`-level access only (no `plug`, `dsnoop`, `dmix`, or `default`, which are alsa-lib userspace plugins): a deliberate choice, because dsnoop's silent resampling is the failure this library exists to avoid, and `sysdefault` already fails inside containers.

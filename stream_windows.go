@@ -13,7 +13,7 @@ import (
 // it, and tests inject a fake. openDevice is a package var so tests can
 // substitute a hardware-free implementation. It mirrors the Linux pcm seam.
 type wasapiDevice interface {
-	Negotiate(rate, channels, bits int) (wasapi.Negotiated, error)
+	Negotiate(rate, channels int, sf wasapi.SampleFormat) (wasapi.Negotiated, error)
 	Start() error
 	Read(buf []byte) (frames int, discontinuity bool, err error)
 	Close() error
@@ -46,7 +46,7 @@ func Open(cfg Config) (*Stream, error) {
 	if cfg.Channels < 1 {
 		return nil, &ConfigError{Field: "channels", Reason: "must be at least 1"}
 	}
-	bits, err := formatBits(cfg.Format)
+	sf, err := waFormat(cfg.Format)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func Open(cfg Config) (*Stream, error) {
 	if err != nil {
 		return nil, translateWASAPIError(err, cfg)
 	}
-	n, err := dev.Negotiate(cfg.Rate, cfg.Channels, bits)
+	n, err := dev.Negotiate(cfg.Rate, cfg.Channels, sf)
 	if err != nil {
 		_ = dev.Close()
 		return nil, translateWASAPIError(err, cfg)
@@ -122,15 +122,17 @@ func (s *Stream) Close() error {
 	return s.dev.Close()
 }
 
-// formatBits maps the public Format to a WASAPI bit depth.
-func formatBits(f Format) (int, error) {
+// waFormat maps the public Format to a WASAPI sample format.
+func waFormat(f Format) (wasapi.SampleFormat, error) {
 	switch f {
 	case FormatS16LE:
-		return 16, nil
+		return wasapi.SampleS16, nil
 	case FormatS32LE:
-		return 32, nil
+		return wasapi.SampleS32, nil
+	case FormatF32LE:
+		return wasapi.SampleF32, nil
 	default:
-		return 0, &ConfigError{Field: "format", Reason: "must be s16 or s32"}
+		return 0, &ConfigError{Field: "format", Reason: "must be s16, s32, or f32"}
 	}
 }
 

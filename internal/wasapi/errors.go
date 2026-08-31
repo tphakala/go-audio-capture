@@ -48,11 +48,11 @@ func (e *BadRateError) Error() string {
 type BadFormatError struct {
 	Rate     int
 	Channels int
-	Bits     int
+	Format   SampleFormat
 }
 
 func (e *BadFormatError) Error() string {
-	return fmt.Sprintf("wasapi: format %d ch / %d-bit @ %d Hz not supported in exclusive mode", e.Channels, e.Bits, e.Rate)
+	return fmt.Sprintf("wasapi: format %d ch / %s @ %d Hz not supported in exclusive mode", e.Channels, e.Format, e.Rate)
 }
 
 // hresultError wraps a failing COM call with the call name and its HRESULT, so

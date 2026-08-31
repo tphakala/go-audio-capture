@@ -23,7 +23,7 @@ func main() {
 	device := flag.String("d", defaultDevice, "capture device id (Linux: hw:card,device; Windows: WASAPI endpoint id, or empty/\"default\")")
 	rate := flag.Int("r", 48000, "sample rate in Hz")
 	channels := flag.Int("c", 1, "channel count")
-	format := flag.String("f", "s16", "sample format: s16 or s32")
+	format := flag.String("f", "s16", "sample format: s16, s32, or f32")
 	dur := flag.Duration("t", 10*time.Second, "record duration")
 	out := flag.String("o", "out.wav", "output WAV file")
 	list := flag.Bool("list", false, "list capture devices and exit")
@@ -73,7 +73,8 @@ func record(device string, rate, channels int, format string, dur time.Duration,
 	defer func() { _ = w.Close() }()
 
 	frameBytes := n.Channels * f.BytesPerSample()
-	if err := writeWAVHeader(w, n.Rate, n.Channels, f.BytesPerSample()); err != nil {
+	wav, err := writeWAVHeader(w, n.Rate, n.Channels, f.BytesPerSample(), f.IsFloat())
+	if err != nil {
 		return err
 	}
 
@@ -96,7 +97,7 @@ func record(device string, rate, channels int, format string, dur time.Duration,
 		dataBytes += int64(wb)
 	}
 	wall := time.Since(start)
-	if err := patchWAVSizes(w, dataBytes); err != nil {
+	if err := wav.patchSizes(w, dataBytes, frameBytes); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "wrote %d bytes to %s, xruns: %d\n", dataBytes, out, s.Xruns())
@@ -117,43 +118,85 @@ func parseFormat(s string) (capture.Format, error) {
 		return capture.FormatS16LE, nil
 	case "s32":
 		return capture.FormatS32LE, nil
+	case "f32":
+		return capture.FormatF32LE, nil
 	default:
-		return 0, fmt.Errorf("unknown format %q (want s16 or s32)", s)
+		return 0, fmt.Errorf("unknown format %q (want s16, s32, or f32)", s)
 	}
 }
 
-// writeWAVHeader writes a 44-byte canonical PCM WAV header with placeholder
-// sizes; patchWAVSizes fills the RIFF and data lengths in once recording ends.
-func writeWAVHeader(w *os.File, rate, channels, bytesPerSample int) error {
-	blockAlign := channels * bytesPerSample
-	byteRate := rate * blockAlign
-	h := make([]byte, 44)
-	copy(h[0:4], "RIFF")
-	// h[4:8] RIFF size, patched later
-	copy(h[8:12], "WAVE")
-	copy(h[12:16], "fmt ")
-	binary.LittleEndian.PutUint32(h[16:20], 16) // fmt chunk size
-	binary.LittleEndian.PutUint16(h[20:22], 1)  // PCM
-	binary.LittleEndian.PutUint16(h[22:24], uint16(channels))
-	binary.LittleEndian.PutUint32(h[24:28], uint32(rate))
-	binary.LittleEndian.PutUint32(h[28:32], uint32(byteRate))
-	binary.LittleEndian.PutUint16(h[32:34], uint16(blockAlign))
-	binary.LittleEndian.PutUint16(h[34:36], uint16(bytesPerSample*8))
-	copy(h[36:40], "data")
-	// h[40:44] data size, patched later
-	_, err := w.Write(h)
-	return err
+// wavLayout records the header length and the byte offsets whose sizes are only
+// known once recording ends, so patchSizes can fill them in. factSizeOff is 0
+// when there is no fact chunk (integer PCM).
+type wavLayout struct {
+	headerLen   int64
+	dataSizeOff int64 // offset of the data-chunk size field
+	factSizeOff int64 // offset of the fact-chunk sample-count field, or 0
 }
 
-func patchWAVSizes(w *os.File, dataBytes int64) error {
+// writeWAVHeader writes the RIFF/WAVE header with placeholder sizes and reports
+// where patchSizes must later fill them in. isFloat selects WAVE_FORMAT_IEEE_FLOAT
+// (tag 3), which a reader needs to interpret f32 samples correctly; the WAV spec
+// requires a fact chunk (sample-frame count) for every non-PCM format, so the
+// float header carries one. Integer PCM (tag 1) uses the canonical 44-byte header
+// with no fact chunk.
+func writeWAVHeader(w *os.File, rate, channels, bytesPerSample int, isFloat bool) (wavLayout, error) {
+	blockAlign := channels * bytesPerSample
+	byteRate := rate * blockAlign
+	formatTag := uint16(1) // WAVE_FORMAT_PCM
+	if isFloat {
+		formatTag = 3 // WAVE_FORMAT_IEEE_FLOAT
+	}
+
+	h := make([]byte, 0, 68)
+	h = append(h, "RIFF"...)
+	h = append(h, 0, 0, 0, 0) // [4:8] RIFF size, patched later
+	h = append(h, "WAVE"...)
+	h = append(h, "fmt "...)
+	h = binary.LittleEndian.AppendUint32(h, 16) // fmt chunk size
+	h = binary.LittleEndian.AppendUint16(h, formatTag)
+	h = binary.LittleEndian.AppendUint16(h, uint16(channels))
+	h = binary.LittleEndian.AppendUint32(h, uint32(rate))
+	h = binary.LittleEndian.AppendUint32(h, uint32(byteRate))
+	h = binary.LittleEndian.AppendUint16(h, uint16(blockAlign))
+	h = binary.LittleEndian.AppendUint16(h, uint16(bytesPerSample*8))
+
+	var lay wavLayout
+	if isFloat {
+		h = append(h, "fact"...)
+		h = binary.LittleEndian.AppendUint32(h, 4) // fact chunk size
+		lay.factSizeOff = int64(len(h))
+		h = append(h, 0, 0, 0, 0) // sample-frame count, patched later
+	}
+	h = append(h, "data"...)
+	lay.dataSizeOff = int64(len(h))
+	h = append(h, 0, 0, 0, 0) // data size, patched later
+	lay.headerLen = int64(len(h))
+
+	if _, err := w.Write(h); err != nil {
+		return wavLayout{}, err
+	}
+	return lay, nil
+}
+
+// patchSizes fills in the RIFF, data, and (for float) fact sizes once dataBytes
+// of samples have been written. frameBytes is the interleaved frame size, used to
+// derive the fact chunk's sample-frame count.
+func (lay wavLayout) patchSizes(w *os.File, dataBytes int64, frameBytes int) error {
 	var buf [4]byte
-	binary.LittleEndian.PutUint32(buf[:], uint32(36+dataBytes))
+	binary.LittleEndian.PutUint32(buf[:], uint32(lay.headerLen-8+dataBytes)) // RIFF size
 	if _, err := w.WriteAt(buf[:], 4); err != nil {
 		return err
 	}
 	binary.LittleEndian.PutUint32(buf[:], uint32(dataBytes))
-	if _, err := w.WriteAt(buf[:], 40); err != nil {
+	if _, err := w.WriteAt(buf[:], lay.dataSizeOff); err != nil {
 		return err
+	}
+	if lay.factSizeOff != 0 && frameBytes > 0 {
+		binary.LittleEndian.PutUint32(buf[:], uint32(dataBytes/int64(frameBytes)))
+		if _, err := w.WriteAt(buf[:], lay.factSizeOff); err != nil {
+			return err
+		}
 	}
 	return nil
 }

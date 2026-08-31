@@ -58,7 +58,7 @@ func TestChannelMask(t *testing.T) {
 }
 
 func TestPCMFormat(t *testing.T) {
-	f := pcmFormat(48000, 2, 16)
+	f := pcmFormat(48000, 2, SampleS16)
 	if f.wFormatTag != 0xFFFE { // WAVE_FORMAT_EXTENSIBLE, pinned by literal
 		t.Errorf("wFormatTag = %#x, want 0xFFFE", f.wFormatTag)
 	}
@@ -89,12 +89,59 @@ func TestPCMFormat(t *testing.T) {
 func TestPCMFormatUltrasonic(t *testing.T) {
 	// 256 kHz mono S16: the ultrasonic bat-audio case. No field overflows a
 	// uint32 (nAvgBytesPerSec = 256000*2 = 512000).
-	f := pcmFormat(256000, 1, 16)
+	f := pcmFormat(256000, 1, SampleS16)
 	if f.nSamplesPerSec != 256000 || f.nChannels != 1 || f.nAvgBytesPerSec != 512000 {
 		t.Errorf("256k mono = %d Hz, %d ch, %d avg bytes", f.nSamplesPerSec, f.nChannels, f.nAvgBytesPerSec)
 	}
 	if f.dwChannelMask != 0x4 {
 		t.Errorf("mono mask = %#x, want 0x4", f.dwChannelMask)
+	}
+}
+
+func TestPCMFormatFloat(t *testing.T) {
+	// FormatF32LE maps to SampleF32: a 32-bit sample width carrying the IEEE-float
+	// subtype (not the integer PCM subtype), so the endpoint is asked for float
+	// exactly rather than an integer format the mixer might convert.
+	f := pcmFormat(48000, 1, SampleF32)
+	if f.wBitsPerSample != 32 || f.wValidBitsPerSample != 32 {
+		t.Errorf("float bits = %d/%d, want 32/32", f.wBitsPerSample, f.wValidBitsPerSample)
+	}
+	if f.nBlockAlign != 4 || f.nAvgBytesPerSec != 192000 { // 1 ch * 4 bytes; 48000*4
+		t.Errorf("float frame sizing = block %d, avg %d; want 4, 192000", f.nBlockAlign, f.nAvgBytesPerSec)
+	}
+	// KSDATAFORMAT_SUBTYPE_IEEE_FLOAT {00000003-0000-0010-8000-00AA00389B71}, pinned
+	// by a local literal so a typo in ksSubtypeIEEEFloat cannot move both sides of
+	// the comparison together.
+	wantFloat := windows.GUID{Data1: 0x00000003, Data2: 0x0000, Data3: 0x0010, Data4: [8]byte{0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}}
+	if f.subFormat != wantFloat {
+		t.Errorf("subFormat = %+v, want KSDATAFORMAT_SUBTYPE_IEEE_FLOAT", f.subFormat)
+	}
+}
+
+func TestSampleFormatBits(t *testing.T) {
+	tests := []struct {
+		sf          SampleFormat
+		bits        int
+		str         string
+		wantSubtype windows.GUID
+	}{
+		{SampleS16, 16, "s16", ksSubtypePCM},
+		{SampleS32, 32, "s32", ksSubtypePCM},
+		{SampleF32, 32, "f32", ksSubtypeIEEEFloat},
+	}
+	for _, tt := range tests {
+		if got := tt.sf.Bits(); got != tt.bits {
+			t.Errorf("%v.Bits() = %d, want %d", tt.sf, got, tt.bits)
+		}
+		if got := tt.sf.String(); got != tt.str {
+			t.Errorf("SampleFormat(%d).String() = %q, want %q", int(tt.sf), got, tt.str)
+		}
+		// Pin which subtype each format dispatches to (S16/S32 -> PCM, F32 -> float).
+		// The GUID byte values themselves are pinned against local literals in
+		// TestPCMFormat and TestPCMFormatFloat, which together guarantee PCM != float.
+		if got := tt.sf.subtype(); got != tt.wantSubtype {
+			t.Errorf("%v.subtype() = %+v, want %+v", tt.sf, got, tt.wantSubtype)
+		}
 	}
 }
 

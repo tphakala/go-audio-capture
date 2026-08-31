@@ -77,8 +77,9 @@ const (
 const (
 	AccessRWInterleaved = 3
 
-	FormatS16LE = 2
-	FormatS32LE = 10
+	FormatS16LE   = 2
+	FormatS32LE   = 10
+	FormatFloatLE = 14 // SNDRV_PCM_FORMAT_FLOAT_LE: 32-bit IEEE-754 little-endian
 
 	SubformatSTD = 0
 )

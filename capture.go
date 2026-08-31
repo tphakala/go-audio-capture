@@ -1,14 +1,22 @@
 package capture
 
-// Format is a PCM sample format. Phase 1 supports signed 16- and 32-bit
-// little-endian; wider or float formats come later.
+// Format is a PCM sample format: signed 16- or 32-bit little-endian integer, or
+// 32-bit IEEE-754 little-endian float. As everywhere else in this library, the
+// requested format is negotiated with the hardware exactly or Open fails; there
+// is no silent sample-format conversion.
 type Format int
 
 const (
-	// FormatS16LE is signed 16-bit little-endian PCM.
+	// FormatS16LE is signed 16-bit little-endian integer PCM.
 	FormatS16LE Format = iota + 1
-	// FormatS32LE is signed 32-bit little-endian PCM.
+	// FormatS32LE is signed 32-bit little-endian integer PCM.
 	FormatS32LE
+	// FormatF32LE is 32-bit IEEE-754 little-endian float PCM. It will be the
+	// native capture format on the planned macOS CoreAudio backend, and is
+	// accepted on Linux/Windows when the endpoint itself supports float (many do
+	// not, in which case Open fails rather than converting; on Windows the failure
+	// is a typed *BadFormatError, on Linux the raw ALSA format-negotiation error).
+	FormatF32LE
 )
 
 // BytesPerSample returns the size of one sample in bytes, or 0 for an unknown
@@ -17,20 +25,26 @@ func (f Format) BytesPerSample() int {
 	switch f {
 	case FormatS16LE:
 		return 2
-	case FormatS32LE:
+	case FormatS32LE, FormatF32LE:
 		return 4
 	default:
 		return 0
 	}
 }
 
-// String returns the ALSA-style format token.
+// IsFloat reports whether the format holds IEEE-754 floating-point samples
+// rather than signed integers.
+func (f Format) IsFloat() bool { return f == FormatF32LE }
+
+// String returns the short format token (matching the gac-rec -f flag).
 func (f Format) String() string {
 	switch f {
 	case FormatS16LE:
 		return "s16"
 	case FormatS32LE:
 		return "s32"
+	case FormatF32LE:
+		return "f32"
 	default:
 		return "unknown"
 	}
