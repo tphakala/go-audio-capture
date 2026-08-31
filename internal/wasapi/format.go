@@ -29,13 +29,15 @@ const (
 	SampleF32                     // 32-bit IEEE-754 float
 )
 
-// Bits returns the sample bit depth (wBitsPerSample).
+// Bits returns the sample bit depth (wBitsPerSample), or 0 for an unknown format.
 func (sf SampleFormat) Bits() int {
 	switch sf {
 	case SampleS16:
 		return 16
-	default: // SampleS32, SampleF32
+	case SampleS32, SampleF32:
 		return 32
+	default:
+		return 0
 	}
 }
 

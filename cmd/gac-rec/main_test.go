@@ -8,50 +8,24 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/tphakala/go-audio-capture"
 )
-
-func TestParseFormat(t *testing.T) {
-	tests := []struct {
-		in      string
-		want    capture.Format
-		wantErr bool
-	}{
-		{"s16", capture.FormatS16LE, false},
-		{"s32", capture.FormatS32LE, false},
-		{"f32", capture.FormatF32LE, false},
-		{"", 0, true},
-		{"u8", 0, true},
-	}
-	for _, tt := range tests {
-		got, err := parseFormat(tt.in)
-		if tt.wantErr {
-			if err == nil {
-				t.Errorf("parseFormat(%q) err = nil, want error", tt.in)
-			}
-			continue
-		}
-		if err != nil || got != tt.want {
-			t.Errorf("parseFormat(%q) = (%v, %v), want (%v, nil)", tt.in, got, err, tt.want)
-		}
-	}
-}
 
 // TestWriteWAVHeaderFormatTag pins the WAV format tag (offset 20, 2 bytes): 1 for
 // integer PCM, 3 (WAVE_FORMAT_IEEE_FLOAT) for float. A reader uses this tag to
 // decide whether the samples are integers or floats, so a wrong tag corrupts f32
-// playback silently.
+// playback silently. It also pins the fmt-chunk size (16 for PCM, 18 for the
+// non-PCM float header that carries a cbSize field) and the fact chunk.
 func TestWriteWAVHeaderFormatTag(t *testing.T) {
 	tests := []struct {
-		name     string
-		isFloat  bool
-		wantTag  uint16
-		wantLen  int64 // 44 for PCM, 56 with the fact chunk
-		wantFact bool
+		name        string
+		isFloat     bool
+		wantTag     uint16
+		wantFmtSize uint32
+		wantLen     int64 // 44 for PCM; 58 for float (fmt 18 + cbSize + fact chunk)
+		wantFact    bool
 	}{
-		{"integer PCM", false, 1, 44, false},
-		{"IEEE float", true, 3, 56, true},
+		{"integer PCM", false, 1, 16, 44, false},
+		{"IEEE float", true, 3, 18, 58, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -82,6 +56,11 @@ func TestWriteWAVHeaderFormatTag(t *testing.T) {
 			}
 			if got := binary.LittleEndian.Uint16(b[20:22]); got != tt.wantTag {
 				t.Errorf("WAV format tag = %d, want %d", got, tt.wantTag)
+			}
+			// fmt-chunk size at offset 16: 16 for integer PCM, 18 for a non-PCM
+			// format that must declare a cbSize field.
+			if got := binary.LittleEndian.Uint32(b[16:20]); got != tt.wantFmtSize {
+				t.Errorf("fmt chunk size = %d, want %d", got, tt.wantFmtSize)
 			}
 			// RIFF size = whole file minus the 8-byte "RIFF"+size prefix.
 			if got := binary.LittleEndian.Uint32(b[4:8]); int64(got) != tt.wantLen-8+dataBytes {

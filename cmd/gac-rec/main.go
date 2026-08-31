@@ -52,7 +52,7 @@ func listDevices() error {
 }
 
 func record(device string, rate, channels int, format string, dur time.Duration, out string) error {
-	f, err := parseFormat(format)
+	f, err := capture.ParseFormat(format)
 	if err != nil {
 		return err
 	}
@@ -112,19 +112,6 @@ func record(device string, rate, channels int, format string, dur time.Duration,
 	return nil
 }
 
-func parseFormat(s string) (capture.Format, error) {
-	switch s {
-	case "s16":
-		return capture.FormatS16LE, nil
-	case "s32":
-		return capture.FormatS32LE, nil
-	case "f32":
-		return capture.FormatF32LE, nil
-	default:
-		return 0, fmt.Errorf("unknown format %q (want s16, s32, or f32)", s)
-	}
-}
-
 // wavLayout records the header length and the byte offsets whose sizes are only
 // known once recording ends, so patchSizes can fill them in. factSizeOff is 0
 // when there is no fact chunk (integer PCM).
@@ -136,16 +123,19 @@ type wavLayout struct {
 
 // writeWAVHeader writes the RIFF/WAVE header with placeholder sizes and reports
 // where patchSizes must later fill them in. isFloat selects WAVE_FORMAT_IEEE_FLOAT
-// (tag 3), which a reader needs to interpret f32 samples correctly; the WAV spec
-// requires a fact chunk (sample-frame count) for every non-PCM format, so the
-// float header carries one. Integer PCM (tag 1) uses the canonical 44-byte header
-// with no fact chunk.
+// (tag 3), which a reader needs to interpret f32 samples correctly. The WAV spec
+// treats only integer PCM as the special case that may use a 16-byte fmt chunk;
+// every non-PCM format must carry a cbSize field (an 18-byte fmt chunk) plus a
+// fact chunk (sample-frame count). So the float header is fmt-18 + cbSize 0 + a
+// fact chunk, and integer PCM (tag 1) stays the canonical 44-byte header.
 func writeWAVHeader(w *os.File, rate, channels, bytesPerSample int, isFloat bool) (wavLayout, error) {
 	blockAlign := channels * bytesPerSample
 	byteRate := rate * blockAlign
 	formatTag := uint16(1) // WAVE_FORMAT_PCM
+	fmtSize := uint32(16)
 	if isFloat {
 		formatTag = 3 // WAVE_FORMAT_IEEE_FLOAT
+		fmtSize = 18  // + cbSize, required for a non-PCM format
 	}
 
 	h := make([]byte, 0, 68)
@@ -153,13 +143,16 @@ func writeWAVHeader(w *os.File, rate, channels, bytesPerSample int, isFloat bool
 	h = append(h, 0, 0, 0, 0) // [4:8] RIFF size, patched later
 	h = append(h, "WAVE"...)
 	h = append(h, "fmt "...)
-	h = binary.LittleEndian.AppendUint32(h, 16) // fmt chunk size
+	h = binary.LittleEndian.AppendUint32(h, fmtSize)
 	h = binary.LittleEndian.AppendUint16(h, formatTag)
 	h = binary.LittleEndian.AppendUint16(h, uint16(channels))
 	h = binary.LittleEndian.AppendUint32(h, uint32(rate))
 	h = binary.LittleEndian.AppendUint32(h, uint32(byteRate))
 	h = binary.LittleEndian.AppendUint16(h, uint16(blockAlign))
 	h = binary.LittleEndian.AppendUint16(h, uint16(bytesPerSample*8))
+	if isFloat {
+		h = binary.LittleEndian.AppendUint16(h, 0) // cbSize = 0 (no format extension)
+	}
 
 	var lay wavLayout
 	if isFloat {

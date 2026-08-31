@@ -1,5 +1,7 @@
 package capture
 
+import "fmt"
+
 // Format is a PCM sample format: signed 16- or 32-bit little-endian integer, or
 // 32-bit IEEE-754 little-endian float. As everywhere else in this library, the
 // requested format is negotiated with the hardware exactly or Open fails; there
@@ -47,6 +49,21 @@ func (f Format) String() string {
 		return "f32"
 	default:
 		return "unknown"
+	}
+}
+
+// ParseFormat maps a short format token ("s16", "s32", "f32") to a Format. It is
+// the inverse of Format.String and returns a *ConfigError for an unknown token.
+func ParseFormat(s string) (Format, error) {
+	switch s {
+	case "s16":
+		return FormatS16LE, nil
+	case "s32":
+		return FormatS32LE, nil
+	case "f32":
+		return FormatF32LE, nil
+	default:
+		return 0, &ConfigError{Field: "format", Reason: fmt.Sprintf("unknown format %q (want s16, s32, or f32)", s)}
 	}
 }
 
