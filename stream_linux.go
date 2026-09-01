@@ -66,11 +66,11 @@ func Open(cfg Config) (*Stream, error) {
 	}
 	periodFrames := cfg.PeriodFrames
 	if periodFrames == 0 {
-		periodFrames = cfg.Rate / 50 // 20 ms
+		periodFrames = alsa.DefaultPeriodFrames(cfg.Rate) // ~20 ms
 	}
 	periods := cfg.Periods
 	if periods == 0 {
-		periods = 4
+		periods = alsa.DefaultPeriods
 	}
 
 	p, err := openPCM(card, device)

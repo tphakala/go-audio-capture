@@ -253,6 +253,59 @@ func TestVerifyRateRejectsSilentSubstitution(t *testing.T) {
 	}
 }
 
+// fakeGeometryDevice models a USB device whose advertised period-size interval
+// has a degenerate lower bound: HW_REFINE offers periods from minAdvertised
+// frames, but HW_PARAMS only COMMITS a rate when the pinned period size is at
+// least minCommittable frames (a realistic buffer). Pinning the advertised
+// minimum is refused with EINVAL; a period at the streaming default (rate/50)
+// commits. This is the ZOOM AMS-24 failure mode at 88200/96000 that made
+// VerifyRate under-report when it pinned the interval minimum instead of
+// verifying with the real streaming open's geometry.
+func fakeGeometryDevice(rangeLo, rangeHi, minAdvertised, minCommittable uint32) ioctlFunc {
+	return func(_ int, req uintptr, arg unsafe.Pointer) error {
+		hw := (*HwParams)(arg)
+		switch req {
+		case iocHwRefine:
+			if lo, hi := hw.Interval(ParamRate); lo != hi {
+				setInterval(hw, ParamRate, rangeLo, rangeHi)
+			}
+			setInterval(hw, ParamPeriodSize, minAdvertised, 8192)
+			setInterval(hw, ParamPeriods, 2, 1024)
+			return nil
+		case iocHwParams:
+			if lo, hi := hw.Interval(ParamRate); lo != hi {
+				return unix.EINVAL // a commit must pin an exact rate
+			}
+			if plo, _ := hw.Interval(ParamPeriodSize); plo < minCommittable {
+				return unix.EINVAL // degenerate buffer geometry refused
+			}
+			return nil
+		default:
+			return nil
+		}
+	}
+}
+
+func TestVerifyRateUsesStreamingGeometryNotIntervalMinimum(t *testing.T) {
+	// Regression for the AMS-24 under-report: the device advertises a period floor
+	// of 8 frames but only commits with a realistic period (>= 64 frames). Pinning
+	// the advertised minimum (the old behavior) fails; verifying with the streaming
+	// default period (rate/50, e.g. 1920 at 96 kHz) commits, matching the real open.
+	const minAdvertised, minCommittable = 8, 64
+	for _, rate := range []int{88200, 96000} {
+		p := newPCM(-1, fakeGeometryDevice(44100, 96000, minAdvertised, minCommittable))
+		ok, err := p.VerifyRate(2, FormatS32LE, rate)
+		if err != nil || !ok {
+			t.Fatalf("VerifyRate(%d) = %v, %v; want true, nil (streaming geometry must commit)", rate, ok, err)
+		}
+	}
+	// Sanity: DefaultPeriodFrames clamps into the advertised interval and stays
+	// above the commit floor for these rates.
+	if pf := DefaultPeriodFrames(96000); pf < minCommittable {
+		t.Fatalf("DefaultPeriodFrames(96000) = %d; test assumes >= %d", pf, minCommittable)
+	}
+}
+
 func TestVerifyRateRejectsEmptyRateInterval(t *testing.T) {
 	// A driver that returns success from the first refine but empties the rate
 	// interval (an unsatisfiable combo signalled without EINVAL) is unsupported.

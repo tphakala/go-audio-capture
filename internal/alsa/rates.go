@@ -98,15 +98,24 @@ func (p *PCM) refineProbe(hw *HwParams) error {
 // therefore over-reports on such devices; VerifyRate is the authoritative check
 // a caller uses when it must not offer a rate the hardware cannot deliver.
 //
-// It refines once to learn the rate window, pins the exact rate, refines AGAIN
-// so the period/buffer bounds are the ones valid at that rate (a high rate can
-// shrink the maximum period), pins the geometry to each refined interval's lower
-// bound (which the driver guarantees is a valid discrete choice), and commits
-// HW_PARAMS. A committed rate equal to the request means supported (true, nil).
-// An EINVAL at refine (the channel/format combo is unsupported) or at commit (a
-// discrete-rate gap, or a refine lie), an emptied rate interval, or a driver that
-// silently substitutes a different rate all mean unsupported (false, nil). Any
-// other errno is a real device error and is returned.
+// It refines once to learn the rate window, checks the rate falls inside it, then
+// pins the exact rate together with the SAME period/buffer geometry the streaming
+// open uses (a ~20 ms period and 4 periods, clamped into the refined bounds; see
+// pinRateGeometry) and commits HW_PARAMS. Verifying with the streaming geometry,
+// rather than the interval's degenerate minimum, is essential: some USB Audio
+// Class devices advertise a period-size interval whose lower bound (e.g. 8 frames)
+// yields a buffer the hardware refuses at high rates, so pinning that minimum drops
+// a rate the real open delivers fine. Sharing pinRateGeometry with Negotiate makes
+// the probe a faithful predictor of the real open at its DEFAULT geometry: a rate
+// commits here iff the streaming open can deliver it with the default
+// period/periods. A caller that opens with a non-zero custom period/periods is not
+// modeled by this probe.
+//
+// A committed rate equal to the request means supported (true, nil). An EINVAL at
+// refine (the channel/format combo is unsupported) or at commit (a discrete-rate
+// gap, or a refine lie), an emptied rate interval, or a driver that silently
+// substitutes a different rate all mean unsupported (false, nil). Any other errno
+// is a real device error and is returned.
 //
 // HW_PARAMS moves the stream to the SETUP state, so a caller verifying several
 // rates must use a fresh fd per rate. Closing from SETUP is safe and frees the
@@ -134,22 +143,11 @@ func (p *PCM) VerifyRate(channels int, format uint32, rate int) (bool, error) {
 		return false, nil // outside the reported window
 	}
 
-	// Pin the exact rate and refine again so the period/buffer bounds reflect this
-	// rate. Then pin the geometry to each interval's lower bound: an arbitrary
-	// constant risks a spurious EINVAL on a device with strict discrete period
-	// sizes, but the interval's own lower bound is always a valid choice.
-	hw.SetIntervalExact(ParamRate, uint32(rate))
-	if err := p.refine(&hw); err != nil {
-		if errors.Is(err, unix.EINVAL) {
-			return false, nil
-		}
-		return false, err
-	}
-	plo, _ := hw.Interval(ParamPeriodSize)
-	hw.SetIntervalExact(ParamPeriodSize, plo)
-	nlo, _ := hw.Interval(ParamPeriods)
-	hw.SetIntervalExact(ParamPeriods, nlo)
-
+	// Pin the exact rate and the streaming open's period/buffer geometry, then
+	// commit. Using the same geometry as the real open (shared via pinRateGeometry)
+	// is what makes this an honest predictor: pinning the period interval's
+	// degenerate minimum instead would false-negative rates that stream fine.
+	hw.pinRateGeometry(rate, DefaultPeriodFrames(rate), DefaultPeriods)
 	if err := p.hwParams(&hw); err != nil {
 		if errors.Is(err, unix.EINVAL) {
 			return false, nil // the driver accepted this rate at refine but cannot commit it

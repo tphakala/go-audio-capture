@@ -206,12 +206,9 @@ func (p *PCM) Negotiate(rate, channels int, format uint32, periodFrames, periods
 	// Pin the exact rate and a sane period geometry clamped into the supported
 	// ranges, then commit. A commit failure here (e.g. a discrete-rate gap
 	// inside the range, or an unsupported period size) surfaces honestly rather
-	// than as a substituted configuration.
-	hw.SetIntervalExact(ParamRate, uint32(rate))
-	plo, phi := hw.Interval(ParamPeriodSize)
-	hw.SetIntervalExact(ParamPeriodSize, clampU32(uint32(periodFrames), plo, phi))
-	nlo, nhi := hw.Interval(ParamPeriods)
-	hw.SetIntervalExact(ParamPeriods, clampU32(uint32(periods), nlo, nhi))
+	// than as a substituted configuration. VerifyRate shares pinRateGeometry so the
+	// rate probe and the real open commit identical geometry.
+	hw.pinRateGeometry(rate, periodFrames, periods)
 	// The rate already passed the [rlo, rhi] window check, so an EINVAL at commit
 	// means the exact rate falls in a discrete gap inside that window (or, rarely,
 	// the clamped period geometry was refused). The library surfaces no
@@ -397,6 +394,39 @@ func clampU32(v, lo, hi uint32) uint32 {
 		return hi
 	}
 	return v
+}
+
+// DefaultPeriods is the streaming open's default periods-per-buffer count when a
+// caller does not specify one. VerifyRate uses it too, so the rate probe commits
+// with the same geometry the real open will.
+const DefaultPeriods = 4
+
+// DefaultPeriodFrames returns the streaming open's default period length in frames
+// for a sample rate: about 20 ms (rate/50), at least one frame. VerifyRate uses it
+// too so a probed rate is committed with the same period geometry the real open
+// uses by default, never the interval's degenerate minimum (which some USB devices
+// reject at high rates).
+func DefaultPeriodFrames(rate int) int {
+	if pf := rate / 50; pf > 0 {
+		return pf
+	}
+	return 1
+}
+
+// pinRateGeometry pins the exact rate and a sane period/buffer geometry into the
+// already-refined hw params: periodFrames and periods, each clamped into the
+// current refined interval so a device with strict bounds still gets a valid
+// choice. Negotiate and VerifyRate share this so a rate is verified with the same
+// geometry the streaming open commits by default; the two paths cannot drift for
+// that default geometry (a caller that passes a non-zero custom period/periods to
+// Open bypasses the defaults and is not what VerifyRate models). It assumes hw has
+// been refined for the target format/channel combo.
+func (hw *HwParams) pinRateGeometry(rate, periodFrames, periods int) {
+	hw.SetIntervalExact(ParamRate, uint32(rate))
+	plo, phi := hw.Interval(ParamPeriodSize)
+	hw.SetIntervalExact(ParamPeriodSize, clampU32(uint32(periodFrames), plo, phi))
+	nlo, nhi := hw.Interval(ParamPeriods)
+	hw.SetIntervalExact(ParamPeriods, clampU32(uint32(periods), nlo, nhi))
 }
 
 // boundary returns a pointer-wrap boundary that is a power-of-two multiple of
