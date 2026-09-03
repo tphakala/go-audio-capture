@@ -492,4 +492,11 @@ func TestBoundary(t *testing.T) {
 			t.Errorf("boundary(%d) = %d is not a power-of-two multiple of the buffer", buf, b)
 		}
 	}
+	// A buffer above boundaryCap (unreachable for a real negotiated buffer) has no
+	// power-of-two multiple within the cap, so boundary returns it unchanged: the
+	// minimal boundary that still satisfies the kernel's boundary >= buffer_size
+	// rule. Clamping to boundaryCap would break that invariant.
+	if got := boundary(boundaryCap + 1); got != boundaryCap+1 {
+		t.Errorf("boundary(boundaryCap+1) = %d, want %d unchanged (boundary must stay >= buffer size)", uint64(got), uint64(boundaryCap+1))
+	}
 }

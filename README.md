@@ -149,5 +149,5 @@ Caveats: these numbers are one machine, one device, at 48 kHz. They do not cover
 ## Development
 
 ```
-task check   # build (amd64/arm64/arm/386, CGO off), vet, lint, gofmt, race tests + GOARCH=386 test run
+task check   # build (amd64/arm64/arm/386/riscv64/loong64, CGO off), vet, lint, gofmt, race tests + GOARCH=386 test run
 ```

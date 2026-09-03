@@ -9,9 +9,10 @@ import (
 
 // The struct sizes, field offsets, and ioctl request numbers asserted here are
 // the kernel's own. The expected values are word-size specific and live in
-// layout_lp64_test.go (amd64, arm64) and layout_ilp32_test.go (386, arm) as the
-// want* constants, each C-verified against /usr/include/sound/asound.h with an
-// offsetof/sizeof probe (see the header comment in each file).
+// layout_lp64_test.go (amd64, arm64, riscv64, loong64) and layout_ilp32_test.go
+// (386, arm) as the want* constants, each C-verified against
+// /usr/include/sound/asound.h with an offsetof/sizeof probe (see the header
+// comment in each file).
 //
 // A mismatch means the Go mirror has drifted from the kernel ABI and every
 // capture would silently corrupt, so these are hard assertions. On amd64/arm64

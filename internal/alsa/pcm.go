@@ -429,11 +429,15 @@ func (hw *HwParams) pinRateGeometry(rate, periodFrames, periods int) {
 	hw.SetIntervalExact(ParamPeriods, clampU32(uint32(periods), nlo, nhi))
 }
 
-// boundary returns a pointer-wrap boundary that is a power-of-two multiple of
-// the buffer size, matching alsa-lib's convention for the sw_params boundary.
-// The result is capped at boundaryCap, which is word-size specific so the value
-// stays inside a uframes and below the kernel's signed hw_ptr limit (LONG_MAX)
-// on both LP64 and ILP32.
+// boundary returns a pointer-wrap boundary that is a power-of-two multiple of the
+// buffer size, matching alsa-lib's convention for the sw_params boundary. For a
+// kernel-negotiated bufferFrames (always far below boundaryCap) it returns the
+// largest such multiple not exceeding boundaryCap, which is word-size specific so
+// it stays inside a uframes and below the kernel's signed hw_ptr limit (LONG_MAX)
+// with doubling-loop headroom. A bufferFrames already above boundaryCap (not
+// reachable for a real device) returns bufferFrames unchanged: the minimal
+// boundary that still satisfies the kernel's boundary >= buffer_size rule.
+// Clamping to boundaryCap instead would violate that rule.
 func boundary(bufferFrames uframes) uframes {
 	if bufferFrames == 0 {
 		return 0
