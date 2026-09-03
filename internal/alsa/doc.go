@@ -11,8 +11,10 @@
 // The kernel's snd_pcm_uframes_t / snd_pcm_sframes_t are C unsigned long / long,
 // so the struct layouts and the size-encoded ioctl numbers depend on the word
 // size. abi_lp64.go and abi_ilp32.go select the word-width types per GOARCH for
-// little-endian LP64 (amd64, arm64) and ILP32 (386, arm); abi_unsupported.go
-// fails the build on any other architecture rather than emitting wrong ioctls.
+// the generic-ioctl little-endian LP64 arches (amd64, arm64, riscv64, loong64)
+// and ILP32 arches (386, arm); abi_unsupported.go fails the build on any other
+// architecture (big-endian, or a PowerPC/MIPS arch whose ioctl encoding differs)
+// rather than emitting wrong ioctls.
 // The pinned sizes/offsets/ioctl numbers are C-verified in
 // layout_lp64_test.go and layout_ilp32_test.go.
 package alsa

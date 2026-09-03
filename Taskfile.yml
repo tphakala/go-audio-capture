@@ -41,6 +41,24 @@ tasks:
     cmds:
       - go build ./...
 
+  build-riscv64:
+    desc: Cross-build for linux/riscv64 (LP64, generic ioctl encoding)
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: riscv64
+    cmds:
+      - go build ./...
+
+  build-loong64:
+    desc: Cross-build for linux/loong64 (LP64, generic ioctl encoding)
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: loong64
+    cmds:
+      - go build ./...
+
   test:
     desc: Run all tests (CGO disabled)
     env:
@@ -64,6 +82,10 @@ tasks:
 
   vet:
     desc: Run go vet for amd64, arm64, arm, and 386
+    # GOOS pinned so `task vet` works from a non-Linux host too (GOOS=darwin with
+    # GOARCH=arm/386 is an invalid pair and would fail).
+    env:
+      GOOS: linux
     cmds:
       - GOARCH=amd64 go vet ./...
       - GOARCH=arm64 go vet ./...
@@ -99,6 +121,8 @@ tasks:
       - task: build-arm64
       - task: build-arm
       - task: build-386
+      - task: build-riscv64
+      - task: build-loong64
       - task: vet
       - task: lint
       - task: fmt

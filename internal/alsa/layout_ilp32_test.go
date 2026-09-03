@@ -18,6 +18,9 @@ package alsa
 //	PVERSION=0x80044100 HW_REFINE=0xc25c4110 HW_PARAMS=0xc25c4111 SW_PARAMS=0xc0684113
 //	PREPARE=0x4140 START=0x4142 DROP=0x4143 RESUME=0x4147 READI=0x800c4151
 const (
+	// Mask ([8]uint32) and Interval (three uint32) are all-uint32, so these sizes
+	// are the same on every arch; they are pinned here per file to keep each table
+	// a complete probe snapshot.
 	wantMaskSize     = 32
 	wantIntervalSize = 12
 
@@ -38,7 +41,9 @@ const (
 	wantSwProto          = 40
 	wantSwReserved       = 48
 
-	wantXferiSize = 12
+	wantXferiSize   = 12
+	wantXferiBuf    = 4
+	wantXferiFrames = 8
 
 	wantIocPVersion = 0x80044100
 	wantIocHwRefine = 0xc25c4110

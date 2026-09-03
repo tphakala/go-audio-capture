@@ -439,9 +439,11 @@ func boundary(bufferFrames uframes) uframes {
 		return 0
 	}
 	b := bufferFrames
-	// Test b against boundaryCap/2 rather than b*2 against boundaryCap: on ILP32
-	// a doubled b could wrap the 32-bit word and loop forever, so never compute
-	// b*2 in the condition itself.
+	// Test b against boundaryCap/2, not b*2 against boundaryCap, so the loop test
+	// never computes b*2. That keeps it from wrapping a 32-bit uframes (which would
+	// spin forever) for an out-of-range buffer size, or if boundaryCap were ever
+	// raised toward the word max; at the current caps no realistic input reaches
+	// that, but the guard stays correct regardless.
 	for b <= boundaryCap/2 {
 		b *= 2
 	}

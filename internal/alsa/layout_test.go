@@ -1,4 +1,4 @@
-//go:build linux && (amd64 || arm64 || 386 || arm)
+//go:build linux && (amd64 || arm64 || 386 || arm || riscv64 || loong64)
 
 package alsa
 
@@ -77,9 +77,23 @@ func TestSwParamsLayout(t *testing.T) {
 	}
 }
 
-func TestXferiSize(t *testing.T) {
+func TestXferiLayout(t *testing.T) {
 	if got := unsafe.Sizeof(Xferi{}); got != wantXferiSize {
 		t.Errorf("sizeof(Xferi) = %d, want %d", got, wantXferiSize)
+	}
+	tests := []struct {
+		name string
+		got  uintptr
+		want uintptr
+	}{
+		{"Result", unsafe.Offsetof(Xferi{}.Result), 0},
+		{"Buf", unsafe.Offsetof(Xferi{}.Buf), wantXferiBuf},
+		{"Frames", unsafe.Offsetof(Xferi{}.Frames), wantXferiFrames},
+	}
+	for _, tt := range tests {
+		if tt.got != tt.want {
+			t.Errorf("offsetof(Xferi.%s) = %d, want %d", tt.name, tt.got, tt.want)
+		}
 	}
 }
 
