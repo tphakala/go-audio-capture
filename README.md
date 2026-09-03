@@ -21,7 +21,7 @@ miniaudio has served well, but the cgo boundary keeps costing debugging time: AL
 
 | Phase | Platform | Backend | Status |
 |-------|----------|---------|--------|
-| 1 | Linux | ALSA via kernel ioctl (/dev/snd), no libasound | implemented (see below) |
+| 1 | Linux (32/64-bit) | ALSA via kernel ioctl (/dev/snd), no libasound | implemented (see below) |
 | 2 | Windows (64-bit) | WASAPI (exclusive mode) via hand-rolled COM/syscall | implemented (see below) |
 | 3 | macOS | CoreAudio/AudioToolbox via purego (still cgo-free) | planned |
 
@@ -88,6 +88,8 @@ go run ./cmd/gac-rec -d hw:1,0 -r 256000 -c 1 -f s16 -t 10s -o out.wav
 
 Validated against the `snd-aloop` loopback (the same kernel ioctl path as a physical card) at 48/192/384 kHz S16 and 48 kHz S32, FFT-verified: a 60 kHz tone at 384 kHz round-trips with all spectral energy above 24 kHz and zero xruns, the exact ultrasonic case dsnoop broke. Field validation on real arm64 hardware with an ultrasonic USB mic is tracked in the tracker.
 
+Architectures: the Linux backend supports the little-endian LP64 arches (`amd64`, `arm64`, `riscv64`, `loong64`) and little-endian ILP32 arches (`386`, `arm`), all of which use the generic `asm-generic/ioctl.h` encoding. `amd64`, `arm64`, `386`, and `arm` are additionally hardware-validated; `riscv64` and `loong64` build on the identical, C-verified LP64 layout and ioctl numbers. The kernel's `snd_pcm_uframes_t` is a C `unsigned long`, so the ioctl struct layouts and the size-encoded ioctl numbers differ between 64- and 32-bit builds; both sets are pinned against `sound/asound.h` (the 32-bit set C-verified with `gcc -m32`) and asserted in the layout tests, with the ILP32 assertions run under `GOARCH=386`. A 32-bit binary was validated capturing from real USB hardware (a 384 kHz AudioMoth mic and a ZOOM AMS-24) through the kernel's 32-bit compat path, negotiating byte-for-byte identically to the 64-bit build. Any other `GOARCH` fails to build rather than silently emitting wrong ioctl numbers: big-endian targets (their `snd_interval` flag bit-packing is little-endian only) and the PowerPC and MIPS families including the little-endian `ppc64le`/`mips64le` (they use an architecture-specific ioctl encoding, so supporting them needs a per-arch ioctl encoder, not just this layout).
+
 ## Phase 2: Windows WASAPI
 
 The Windows backend talks to WASAPI through hand-rolled COM over `golang.org/x/sys/windows` (no cgo, no third-party COM or audio dependency), the Windows analog of the ALSA backend. It captures in **exclusive mode only** (`AUDCLNT_SHAREMODE_EXCLUSIVE`), the WASAPI equivalent of ALSA `hw:` access: the format is negotiated directly with the endpoint. Shared mode is deliberately unsupported, because the OS mixer resamples to the engine mix rate and converts the sample format behind the caller's back, the same silent conversion the library exists to avoid. `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` is never used.
@@ -110,7 +112,7 @@ s, err := capture.Open(capture.Config{
 // ... Start / Read / Close exactly as on Linux
 ```
 
-Capture is event-driven: `Read` blocks on the audio-ready event and an internal close event, so `Close` unblocks a parked `Read` from another goroutine. `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` and device overruns are counted via `Stream.Xruns()`. Delivered frames are kept equal to the device's own advance (via the packet `devicePosition`), so drivers that re-present buffers do not over-deliver and high-rate streams do not silently drop. The backend is 64-bit only (`amd64`/`arm64`).
+Capture is event-driven: `Read` blocks on the audio-ready event and an internal close event, so `Close` unblocks a parked `Read` from another goroutine. `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` and device overruns are counted via `Stream.Xruns()`. Delivered frames are kept equal to the device's own advance (via the packet `devicePosition`), so drivers that re-present buffers do not over-deliver and high-rate streams do not silently drop. The WASAPI backend is 64-bit only (`amd64`/`arm64`).
 
 `cmd/gac-rec` is cross-platform; on Windows the device is an endpoint-id string or `"default"`:
 
@@ -147,5 +149,5 @@ Caveats: these numbers are one machine, one device, at 48 kHz. They do not cover
 ## Development
 
 ```
-task check   # build (amd64 + arm64, CGO off), vet, lint, gofmt, race tests
+task check   # build (amd64/arm64/arm/386/riscv64/loong64, CGO off), vet, lint, gofmt, race tests + GOARCH=386 test run
 ```

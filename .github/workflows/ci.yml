@@ -40,11 +40,49 @@ jobs:
       - name: Build (linux/arm64, CGO disabled)
         run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./...
 
+      - name: Build (linux/arm and linux/386, 32-bit ILP32)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm go build ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=386 go build ./...
+
+      - name: Build (linux/riscv64 and linux/loong64, other LP64 targets)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 go build ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=loong64 go build ./...
+
       - name: Cross-compile Windows target (windows/amd64)
         run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build ./...
 
       - name: Test with coverage
         run: go test -race -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
+
+      # Runs the whole suite as 386 binaries on the x86_64 runner (32-bit exec via
+      # IA32 emulation), which executes the ILP32 layout assertions in
+      # layout_ilp32_test.go against Go's real 32-bit struct layout. No -race: the
+      # race detector is not supported on 386.
+      - name: Test (linux/386, ILP32 layout assertions)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=386 go test ./...
+
+      # The unsupported-arch guard (internal/alsa/abi_unsupported.go) must fail the
+      # build on an unverified GOARCH rather than silently emit wrong ioctls. Two
+      # reasons are checked: s390x is big-endian (unverified snd_interval flag
+      # bit-packing), and ppc64le is little-endian LP64 but PowerPC's non-generic
+      # ioctl encoding would make the size-encoded numbers wrong. Both must stop at
+      # the guard's sentinel identifier.
+      - name: Unsupported arch must fail to build (guard check)
+        run: |
+          for arch in s390x ppc64le; do
+            if CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build ./... 2>/tmp/guard-$arch.err; then
+              echo "expected linux/$arch to be rejected by the unsupported-arch guard, but the build succeeded"
+              exit 1
+            fi
+            if ! grep -q "unsupported_GOARCH" /tmp/guard-$arch.err; then
+              echo "linux/$arch build failed, but not via the guard sentinel:"
+              cat /tmp/guard-$arch.err
+              exit 1
+            fi
+            echo "linux/$arch correctly rejected by the unsupported-arch guard"
+          done
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
@@ -86,6 +124,10 @@ jobs:
             goarch: amd64
           - goos: linux
             goarch: arm64
+          - goos: linux
+            goarch: arm
+          - goos: linux
+            goarch: '386'
           - goos: windows
             goarch: amd64
     steps:
@@ -109,7 +151,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        goos: [linux, windows]
+        # linux/386 so the ILP32-tagged files (abi_ilp32.go, layout_ilp32_test.go)
+        # are linted, not just built and vetted.
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: '386'
+          - goos: windows
+            goarch: amd64
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -127,9 +177,10 @@ jobs:
             echo "$files"
             exit 1
           fi
-      - name: golangci-lint (GOOS=${{ matrix.goos }})
+      - name: golangci-lint (${{ matrix.goos }}/${{ matrix.goarch }})
         uses: golangci/golangci-lint-action@v9
         env:
           GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}

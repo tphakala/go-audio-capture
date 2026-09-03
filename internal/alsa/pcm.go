@@ -253,10 +253,10 @@ func (p *PCM) Negotiate(rate, channels int, format uint32, periodFrames, periods
 // overrun does not auto-stop the stream (Recover handles overruns).
 func (p *PCM) setSwParams(n Negotiated) error {
 	sw := SwParams{
-		AvailMin:       uint64(n.PeriodFrames),
-		StartThreshold: uint64(n.BufferFrames) + 1,
-		StopThreshold:  ^uint64(0),
-		Boundary:       boundary(uint64(n.BufferFrames)),
+		AvailMin:       uframes(n.PeriodFrames),
+		StartThreshold: uframes(n.BufferFrames) + 1,
+		StopThreshold:  ^uframes(0),
+		Boundary:       boundary(uframes(n.BufferFrames)),
 	}
 	if err := p.guardedIoctl(iocSwParams, unsafe.Pointer(&sw)); err != nil {
 		return &ioctlError{Op: "SW_PARAMS", Err: err}
@@ -287,7 +287,7 @@ func (p *PCM) ReadI(buf []byte, frames int) (int, error) {
 	}
 	// Reuse the preallocated descriptor; Result is overwritten by the ioctl.
 	p.xferi.Buf = unsafe.Pointer(&buf[0])
-	p.xferi.Frames = uint64(frames)
+	p.xferi.Frames = uframes(frames)
 	// Register as in-flight so Close cannot close the fd underneath the syscall.
 	// The blocking ioctl runs outside the mutex; a concurrent Close unblocks it
 	// with DROP, then waits for release below before it closes the fd.
@@ -429,14 +429,26 @@ func (hw *HwParams) pinRateGeometry(rate, periodFrames, periods int) {
 	hw.SetIntervalExact(ParamPeriods, clampU32(uint32(periods), nlo, nhi))
 }
 
-// boundary returns a pointer-wrap boundary that is a power-of-two multiple of
-// the buffer size, matching alsa-lib's convention for the sw_params boundary.
-func boundary(bufferFrames uint64) uint64 {
+// boundary returns a pointer-wrap boundary that is a power-of-two multiple of the
+// buffer size, matching alsa-lib's convention for the sw_params boundary. For a
+// kernel-negotiated bufferFrames (always far below boundaryCap) it returns the
+// largest such multiple not exceeding boundaryCap, which is word-size specific so
+// it stays inside a uframes and below the kernel's signed hw_ptr limit (LONG_MAX)
+// with doubling-loop headroom. A bufferFrames already above boundaryCap (not
+// reachable for a real device) returns bufferFrames unchanged: the minimal
+// boundary that still satisfies the kernel's boundary >= buffer_size rule.
+// Clamping to boundaryCap instead would violate that rule.
+func boundary(bufferFrames uframes) uframes {
 	if bufferFrames == 0 {
 		return 0
 	}
 	b := bufferFrames
-	for b*2 <= 1<<60 {
+	// Test b against boundaryCap/2, not b*2 against boundaryCap, so the loop test
+	// never computes b*2. That keeps it from wrapping a 32-bit uframes (which would
+	// spin forever) for an out-of-range buffer size, or if boundaryCap were ever
+	// raised toward the word max; at the current caps no realistic input reaches
+	// that, but the guard stays correct regardless.
+	for b <= boundaryCap/2 {
 		b *= 2
 	}
 	return b

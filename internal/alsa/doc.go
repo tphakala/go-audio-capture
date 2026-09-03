@@ -7,4 +7,14 @@
 // All ABI-bearing code lives in the linux-tagged files; this file carries no
 // build constraint so the package remains non-empty (and `go build ./...`
 // stays happy) on non-Linux platforms, where the backend is simply absent.
+//
+// The kernel's snd_pcm_uframes_t / snd_pcm_sframes_t are C unsigned long / long,
+// so the struct layouts and the size-encoded ioctl numbers depend on the word
+// size. abi_lp64.go and abi_ilp32.go select the word-width types per GOARCH for
+// the generic-ioctl little-endian LP64 arches (amd64, arm64, riscv64, loong64)
+// and ILP32 arches (386, arm); abi_unsupported.go fails the build on any other
+// architecture (big-endian, or a PowerPC/MIPS arch whose ioctl encoding differs)
+// rather than emitting wrong ioctls.
+// The pinned sizes/offsets/ioctl numbers are C-verified in
+// layout_lp64_test.go and layout_ilp32_test.go.
 package alsa

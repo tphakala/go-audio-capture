@@ -23,6 +23,42 @@ tasks:
     cmds:
       - go build ./...
 
+  build-arm:
+    desc: Cross-build for linux/arm (32-bit ILP32, e.g. armv7 Raspberry Pi)
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: arm
+    cmds:
+      - go build ./...
+
+  build-386:
+    desc: Cross-build for linux/386 (32-bit ILP32)
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: '386'
+    cmds:
+      - go build ./...
+
+  build-riscv64:
+    desc: Cross-build for linux/riscv64 (LP64, generic ioctl encoding)
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: riscv64
+    cmds:
+      - go build ./...
+
+  build-loong64:
+    desc: Cross-build for linux/loong64 (LP64, generic ioctl encoding)
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: loong64
+    cmds:
+      - go build ./...
+
   test:
     desc: Run all tests (CGO disabled)
     env:
@@ -35,11 +71,26 @@ tasks:
     cmds:
       - go test -race ./...
 
+  test:ilp32:
+    desc: Run tests as 386 binaries so the ILP32 layout assertions execute (no -race; unsupported on 386). Needs an x86_64 host with 32-bit exec support.
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: '386'
+    cmds:
+      - go test ./...
+
   vet:
-    desc: Run go vet for amd64 and arm64
+    desc: Run go vet for amd64, arm64, arm, and 386
+    # GOOS pinned so `task vet` works from a non-Linux host too (GOOS=darwin with
+    # GOARCH=arm/386 is an invalid pair and would fail).
+    env:
+      GOOS: linux
     cmds:
       - GOARCH=amd64 go vet ./...
       - GOARCH=arm64 go vet ./...
+      - GOARCH=arm go vet ./...
+      - GOARCH=386 go vet ./...
 
   lint:
     desc: Run golangci-lint
@@ -64,11 +115,16 @@ tasks:
       - go mod verify
 
   check:
-    desc: Full local gate (build, arm64 build, vet, lint, fmt, race tests)
+    desc: Full local gate (build amd64/arm64/arm/386/riscv64/loong64, vet, lint, fmt, race + ILP32 tests)
     cmds:
       - task: build
       - task: build-arm64
+      - task: build-arm
+      - task: build-386
+      - task: build-riscv64
+      - task: build-loong64
       - task: vet
       - task: lint
       - task: fmt
       - task: test:race
+      - task: test:ilp32

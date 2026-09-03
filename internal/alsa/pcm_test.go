@@ -200,7 +200,7 @@ func TestReadIReturnsFrameCount(t *testing.T) {
 	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
 		if req == iocReadIFrames {
 			x := (*Xferi)(arg)
-			x.Result = int64(x.Frames) // pretend every requested frame arrived
+			x.Result = sframes(x.Frames) // pretend every requested frame arrived
 		}
 		return nil
 	}
@@ -455,5 +455,48 @@ func TestCloseConcurrent(t *testing.T) {
 		if err != nil {
 			t.Errorf("concurrent Close[%d] = %v, want nil", i, err)
 		}
+	}
+}
+
+// TestBoundary asserts the sw_params pointer-wrap boundary directly. It runs on
+// both word sizes (boundaryCap is 1<<60 on LP64 and 1<<30 on ILP32), so under
+// GOARCH=386 the properties below are checked against the real 32-bit uframes
+// arithmetic that boundary() performs.
+func TestBoundary(t *testing.T) {
+	if got := boundary(0); got != 0 {
+		t.Errorf("boundary(0) = %d, want 0", got)
+	}
+	// Typical kernel-negotiated buffer sizes in frames, plus a non-power-of-two
+	// (3) to prove the result is a power-of-two MULTIPLE of the buffer, not a bare
+	// power of two.
+	for _, buf := range []uframes{1, 3, 960, 7680, 16384, 30720} {
+		b := boundary(buf)
+		if b < buf {
+			t.Errorf("boundary(%d) = %d, want >= the buffer size", buf, b)
+		}
+		if b > boundaryCap {
+			t.Errorf("boundary(%d) = %d, exceeds boundaryCap %d", buf, b, uint64(boundaryCap))
+		}
+		// Maximal: one more doubling would pass boundaryCap. Tested as
+		// b > boundaryCap/2 so the check never computes b*2 (which would overflow a
+		// 32-bit uframes near the cap, the very hazard under test).
+		if b <= boundaryCap/2 {
+			t.Errorf("boundary(%d) = %d is not maximal (<= boundaryCap/2 = %d)", buf, b, uint64(boundaryCap/2))
+		}
+		// b must be buf * 2^k for some k >= 0.
+		q := b
+		for q > buf && q%2 == 0 {
+			q /= 2
+		}
+		if q != buf {
+			t.Errorf("boundary(%d) = %d is not a power-of-two multiple of the buffer", buf, b)
+		}
+	}
+	// A buffer above boundaryCap (unreachable for a real negotiated buffer) has no
+	// power-of-two multiple within the cap, so boundary returns it unchanged: the
+	// minimal boundary that still satisfies the kernel's boundary >= buffer_size
+	// rule. Clamping to boundaryCap would break that invariant.
+	if got := boundary(boundaryCap + 1); got != boundaryCap+1 {
+		t.Errorf("boundary(boundaryCap+1) = %d, want %d unchanged (boundary must stay >= buffer size)", uint64(got), uint64(boundaryCap+1))
 	}
 }
