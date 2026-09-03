@@ -200,7 +200,7 @@ func TestReadIReturnsFrameCount(t *testing.T) {
 	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
 		if req == iocReadIFrames {
 			x := (*Xferi)(arg)
-			x.Result = int64(x.Frames) // pretend every requested frame arrived
+			x.Result = sframes(x.Frames) // pretend every requested frame arrived
 		}
 		return nil
 	}

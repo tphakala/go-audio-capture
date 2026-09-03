@@ -40,11 +40,23 @@ jobs:
       - name: Build (linux/arm64, CGO disabled)
         run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./...
 
+      - name: Build (linux/arm and linux/386, 32-bit ILP32)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm go build ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=386 go build ./...
+
       - name: Cross-compile Windows target (windows/amd64)
         run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build ./...
 
       - name: Test with coverage
         run: go test -race -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
+
+      # Runs the whole suite as 386 binaries on the x86_64 runner (32-bit exec via
+      # IA32 emulation), which executes the ILP32 layout assertions in
+      # layout_ilp32_test.go against Go's real 32-bit struct layout. No -race: the
+      # race detector is not supported on 386.
+      - name: Test (linux/386, ILP32 layout assertions)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=386 go test ./...
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
@@ -86,6 +98,10 @@ jobs:
             goarch: amd64
           - goos: linux
             goarch: arm64
+          - goos: linux
+            goarch: arm
+          - goos: linux
+            goarch: '386'
           - goos: windows
             goarch: amd64
     steps:

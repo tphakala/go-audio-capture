@@ -36,14 +36,15 @@ func ioc(dir, typ, nr, size uintptr) uintptr {
 }
 
 // Xferi is the argument to SNDRV_PCM_IOCTL_READI_FRAMES / WRITEI_FRAMES
-// (struct snd_xferi). Result is snd_pcm_sframes_t (a signed long), Frames is
-// snd_pcm_uframes_t (an unsigned long); both are 8 bytes on the LP64 targets.
-// Buf is kept as unsafe.Pointer, not uintptr, so the GC keeps the referenced
-// capture buffer alive for the duration of the ioctl.
+// (struct snd_xferi). Result is snd_pcm_sframes_t (a signed long, see sframes),
+// Frames is snd_pcm_uframes_t (an unsigned long, see uframes); both track the
+// word size (8 bytes on LP64, 4 on ILP32), which sets the struct size and hence
+// the READI_FRAMES ioctl number. Buf is kept as unsafe.Pointer, not uintptr, so
+// the GC keeps the referenced capture buffer alive for the duration of the ioctl.
 type Xferi struct {
-	Result int64
+	Result sframes
 	Buf    unsafe.Pointer
-	Frames uint64
+	Frames uframes
 }
 
 // SNDRV_PCM ioctl request numbers, computed from the actual Go struct sizes so

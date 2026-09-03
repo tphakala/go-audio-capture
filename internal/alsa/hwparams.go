@@ -29,8 +29,10 @@ const (
 
 // HwParams mirrors struct snd_pcm_hw_params. Sync (16 bytes) and Reserved
 // (48 bytes) together cover the kernel's sync[16] and reserved[48] tail; this
-// backend reads neither. Field sizes and offsets are asserted in
-// layout_test.go against the kernel ABI.
+// backend reads neither. FifoSize is snd_pcm_uframes_t (see uframes), which
+// moves the tail offsets and the struct size between LP64 and ILP32. Field sizes
+// and offsets are asserted per word size in layout_{lp64,ilp32}_test.go against
+// the kernel ABI.
 type HwParams struct {
 	Flags     uint32
 	Masks     [3]Mask      // ACCESS, FORMAT, SUBFORMAT
@@ -43,7 +45,7 @@ type HwParams struct {
 	Msbits    uint32       // R: significant bits per sample
 	RateNum   uint32       // R: rate numerator
 	RateDen   uint32       // R: rate denominator
-	FifoSize  uint64       // R: chip FIFO size in frames (snd_pcm_uframes_t)
+	FifoSize  uframes      // R: chip FIFO size in frames (snd_pcm_uframes_t)
 	Sync      [16]uint8    // R: synchronization ID
 	Reserved  [48]uint8
 }

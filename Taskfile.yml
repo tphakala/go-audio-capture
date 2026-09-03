@@ -23,6 +23,24 @@ tasks:
     cmds:
       - go build ./...
 
+  build-arm:
+    desc: Cross-build for linux/arm (32-bit ILP32, e.g. armv7 Raspberry Pi)
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: arm
+    cmds:
+      - go build ./...
+
+  build-386:
+    desc: Cross-build for linux/386 (32-bit ILP32)
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: '386'
+    cmds:
+      - go build ./...
+
   test:
     desc: Run all tests (CGO disabled)
     env:
@@ -35,11 +53,22 @@ tasks:
     cmds:
       - go test -race ./...
 
+  test:ilp32:
+    desc: Run tests as 386 binaries so the ILP32 layout assertions execute (no -race; unsupported on 386). Needs an x86_64 host with 32-bit exec support.
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: '386'
+    cmds:
+      - go test ./...
+
   vet:
-    desc: Run go vet for amd64 and arm64
+    desc: Run go vet for amd64, arm64, arm, and 386
     cmds:
       - GOARCH=amd64 go vet ./...
       - GOARCH=arm64 go vet ./...
+      - GOARCH=arm go vet ./...
+      - GOARCH=386 go vet ./...
 
   lint:
     desc: Run golangci-lint
@@ -64,11 +93,14 @@ tasks:
       - go mod verify
 
   check:
-    desc: Full local gate (build, arm64 build, vet, lint, fmt, race tests)
+    desc: Full local gate (build amd64/arm64/arm/386, vet, lint, fmt, race + ILP32 tests)
     cmds:
       - task: build
       - task: build-arm64
+      - task: build-arm
+      - task: build-386
       - task: vet
       - task: lint
       - task: fmt
       - task: test:race
+      - task: test:ilp32
