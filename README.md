@@ -84,7 +84,7 @@ for {
 |---|---|---|
 | USB with a serial | `usb:<vid>:<pid>:s=<serial>:if=<n>,<dev>` | `usb:16d0:06f3:s=0384_2474750763FA81C9:if=0,0` |
 | USB without a serial | `usb:<vid>:<pid>:p=<controller>-<devpath>:if=<n>,<dev>` | `usb:1686:067f:p=0000:00:14.0-3:if=0,0` |
-| Non-USB | `hw:CARD=<card id>,DEV=<dev>` (alsa-lib syntax) | `hw:CARD=Loopback,DEV=1` |
+| Non-USB | `hw:CARD=<card id>,DEV=<dev>` (alsa-lib syntax, see the caveat below) | `hw:CARD=Loopback,DEV=1` |
 
 A device with a serial is keyed on the serial, so it keeps its id when moved to another port. One without a serial is keyed on the physical port instead, which keeps two identical units apart; `vid:pid` stays in the port form so a different model moved onto that port reports not-found rather than being opened as if it were the expected device. Bytes outside `[A-Za-z0-9._-]` are percent-escaped in both the serial and the port value, with the port keeping `:` raw so a PCI controller address stays readable. The USB bus number is deliberately unused, because bus numbers follow controller probe order.
 

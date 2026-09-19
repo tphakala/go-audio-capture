@@ -28,13 +28,15 @@ const (
 	// assertions and the fixtures cannot drift apart (and to satisfy goconst).
 	// audiomothVID/PID/Serial describe the serial-reporting AudioMoth mic;
 	// compositeVID/PID the composite test device; dupSerial the shared serial of
-	// the same-serial twins; twinPort4ID the port-form id of the twin on devpath 4.
+	// the same-serial twins; twinPort3ID and twinPort4ID the port-form ids of the
+	// twins on devpath 3 and devpath 4.
 	audiomothVID    = "16d0"
 	audiomothPID    = "06f3"
 	audiomothSerial = "0384_2474750763FA81C9"
 	compositeVID    = "1234"
 	compositePID    = "5678"
 	dupSerial       = "DUPLICATE"
+	twinPort3ID     = "usb:16d0:06f3:p=0000:00:14.0-3:if=0,0"
 	twinPort4ID     = "usb:16d0:06f3:p=0000:00:14.0-4:if=0,0"
 )
 
@@ -650,5 +652,96 @@ func TestDevicesWithGlobMetaInProcRoot(t *testing.T) {
 	}
 	if len(devs) != 1 {
 		t.Fatalf("got %d devices, want 1: a glob metacharacter in the root must not hide them", len(devs))
+	}
+}
+
+// TestDevicesUnreadableDeviceLinkIsNotTreatedAsAbsent is the device-link half
+// of the absent-versus-unreadable distinction. A card with no cardN/device link
+// is a virtual card and its kernel card id names it fine. A link that exists
+// but cannot be resolved leaves us unable to tell whether the card is behind
+// USB, so falling back to the card id would publish a confident hw:CARD= id for
+// what may be a USB device that owns a usb: one.
+func TestDevicesUnreadableDeviceLinkIsNotTreatedAsAbsent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 does not deny traversal, so the case cannot be staged")
+	}
+	proc, sys := buildFixture(t, []fakeCard{serialCard(1, "SN-LINK", "3")})
+
+	// Block traversal of the tree the link points INTO, not the card directory
+	// itself: cardN/id must stay readable, so the only thing that fails is
+	// resolving cardN/device. Blocking the card directory instead would fail the
+	// id read first and the test would pass without ever exercising this path.
+	devRoot := filepath.Join(sys, "devices")
+	if err := os.Chmod(devRoot, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(devRoot, 0o755) })
+
+	devs, err := devicesFrom(proc, sys)
+	if err != nil {
+		t.Fatalf("devicesFrom: %v", err)
+	}
+	if len(devs) != 1 {
+		t.Fatalf("got %d devices, want 1: %+v", len(devs), devs)
+	}
+	if devs[0].IDStable {
+		t.Errorf("IDStable = true though cardN/device could not be resolved; ID = %q", devs[0].ID)
+	}
+	if strings.HasPrefix(devs[0].ID, "hw:CARD=") {
+		t.Errorf("ID = %q: an unreadable device link must not fall through to the card-id form", devs[0].ID)
+	}
+}
+
+// TestDevicesDanglingDeviceLinkIsNotTreatedAsAbsent is the case a plain
+// "does it exist" error check cannot see. filepath.EvalSymlinks walks the whole
+// chain, so a device link that is PRESENT but whose target is gone fails with
+// the same ENOENT as a link that was never there. That shape is exactly what a
+// partially masked /sys produces (class/sound mounted, devices/ not), and
+// treating it as absence would publish a confident hw:CARD= id for a card we
+// cannot actually identify.
+func TestDevicesDanglingDeviceLinkIsNotTreatedAsAbsent(t *testing.T) {
+	proc, sys := buildFixture(t, []fakeCard{serialCard(1, "SN-DANGLING", "3")})
+
+	// Remove the tree the link points into, leaving the link itself in place.
+	if err := os.RemoveAll(filepath.Join(sys, "devices")); err != nil {
+		t.Fatalf("remove devices tree: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(sys, "class", "sound", "card1", "device")); err != nil {
+		t.Fatalf("the device link itself must still exist for this case: %v", err)
+	}
+
+	devs, err := devicesFrom(proc, sys)
+	if err != nil {
+		t.Fatalf("devicesFrom: %v", err)
+	}
+	if len(devs) != 1 {
+		t.Fatalf("got %d devices, want 1: %+v", len(devs), devs)
+	}
+	if devs[0].IDStable {
+		t.Errorf("IDStable = true for a card whose device link dangles; ID = %q", devs[0].ID)
+	}
+	if strings.HasPrefix(devs[0].ID, "hw:CARD=") {
+		t.Errorf("ID = %q: a dangling device link must not fall through to the card-id form", devs[0].ID)
+	}
+}
+
+// TestDevicesVirtualCardWithNoDeviceLinkStaysStable is the counterpart that
+// keeps the fix from over-reaching: a card with genuinely no device link is a
+// virtual card, and its kernel card id is a perfectly good stable identity.
+func TestDevicesVirtualCardWithNoDeviceLinkStaysStable(t *testing.T) {
+	c := loopbackCard(0)
+	c.NoDeviceLink = true
+	proc, sys := buildFixture(t, []fakeCard{c})
+
+	devs, err := devicesFrom(proc, sys)
+	if err != nil {
+		t.Fatalf("devicesFrom: %v", err)
+	}
+	if len(devs) == 0 {
+		t.Fatal("virtual card vanished from enumeration")
+	}
+	if !devs[0].IDStable || devs[0].ID != wantLoopbackID {
+		t.Errorf("ID = %q (stable %v), want %q and stable: an absent device link is not a failure",
+			devs[0].ID, devs[0].IDStable, wantLoopbackID)
 	}
 }

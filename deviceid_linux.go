@@ -39,10 +39,24 @@ func readCardIdent(sys string, card int) cardIdent {
 
 	// cardN/device is a symlink to the bus device that owns the card: the USB
 	// interface for a USB Audio Class card, the platform/PCI node otherwise.
-	devDir, err := filepath.EvalSymlinks(filepath.Join(base, "device"))
+	devLink := filepath.Join(base, "device")
+	devDir, err := filepath.EvalSymlinks(devLink)
 	if err != nil {
-		// No device node at all. A kernel card id alone is still a usable
-		// identity for a fixed platform card, so accept it when we have one.
+		// Absence and unresolvability are different answers here, exactly as
+		// they are for an attribute. A card with no device link at all is a
+		// virtual card, and its kernel card id is a usable identity. A link that
+		// exists but does not resolve leaves us unable to tell whether the card
+		// is behind USB, so keying it on the card id would hand out a confident
+		// hw:CARD= id for what may be a USB device that owns a usb: one.
+		//
+		// The error from EvalSymlinks cannot make that distinction on its own: it
+		// walks the whole chain, so a DANGLING link (present, target missing, the
+		// shape a partially masked /sys produces) fails with ENOENT just as an
+		// absent link does. Ask about the link itself with Lstat, which does not
+		// follow it.
+		if _, lerr := os.Lstat(devLink); !errors.Is(lerr, fs.ErrNotExist) {
+			return cardIdent{}
+		}
 		if id == "" {
 			return cardIdent{}
 		}
@@ -404,7 +418,10 @@ func Resolve(id string) (DeviceInfo, error) {
 		}
 		devs, err := Devices()
 		if err != nil {
-			return DeviceInfo{}, err
+			// Same reasoning as matchStableID: a caller told to retire a device
+			// on ErrDeviceGone must see that classification from both branches,
+			// or the numeric and stable forms behave differently for one cause.
+			return DeviceInfo{}, fmt.Errorf("%w: %w", ErrDeviceGone, err)
 		}
 		for i := range devs {
 			if devs[i].Card == card && devs[i].Device == dev {

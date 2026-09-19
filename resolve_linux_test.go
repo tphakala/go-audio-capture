@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -95,7 +96,7 @@ func TestResolveDeviceAmbiguous(t *testing.T) {
 	}
 	// The message tells the user to pin one by its PortID, so it must name the
 	// two PortIDs (not the hw addresses): the twin on devpath 3 and on devpath 4.
-	port3 := "usb:16d0:06f3:p=0000:00:14.0-3:if=0,0"
+	port3 := twinPort3ID
 	port4 := twinPort4ID
 	if !strings.Contains(err.Error(), port3) || !strings.Contains(err.Error(), port4) {
 		t.Errorf("error should name both PortIDs %q and %q, got %q", port3, port4, err.Error())
@@ -107,7 +108,7 @@ func TestResolveDeviceAmbiguous(t *testing.T) {
 		portID string
 		card   int
 	}{
-		{"usb:16d0:06f3:p=0000:00:14.0-3:if=0,0", 1},
+		{twinPort3ID, 1},
 		{twinPort4ID, 2},
 	} {
 		r, err := resolveDevice(tc.portID)
@@ -548,10 +549,46 @@ func TestResolveAmbiguousFallsBackToHWAddr(t *testing.T) {
 	}
 	// The one with a port is named by it; the one without falls back to its
 	// current-boot address rather than going blank.
-	if !slices.Contains(amb.Matches, "usb:16d0:06f3:p=0000:00:14.0-3:if=0,0") {
+	if !slices.Contains(amb.Matches, twinPort3ID) {
 		t.Errorf("Matches = %v, want the derivable port named by its PortID", amb.Matches)
 	}
 	if !slices.Contains(amb.Matches, "hw:2,0") {
 		t.Errorf("Matches = %v, want the port-less twin named by its HWAddr", amb.Matches)
+	}
+}
+
+// TestResolveNumericEnumerationFailureIsDeviceGone is the numeric counterpart
+// of TestResolveEnumerationFailureIsDeviceGone. Both branches of Resolve reach
+// Devices(), so both must classify its failure the same way; otherwise a caller
+// retiring on ErrDeviceGone behaves differently depending on which id form it
+// happens to hold.
+func TestResolveNumericEnumerationFailureIsDeviceGone(t *testing.T) {
+	setRoots(t, absentSysRoot(t), absentSysRoot(t))
+
+	_, err := Resolve(hwAddrCard1)
+	if err == nil {
+		t.Fatal("Resolve with an unreadable /proc/asound returned nil error")
+	}
+	if !errors.Is(err, ErrDeviceGone) {
+		t.Errorf("errors.Is(err, ErrDeviceGone) = false, want true; err = %v", err)
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the underlying cause was lost; err = %v", err)
+	}
+}
+
+// TestAmbiguousDeviceErrorQuotesMatches pins the rendering, because every id
+// form ends in ",<dev>": an unquoted comma-joined list cannot be split back
+// into its entries.
+func TestAmbiguousDeviceErrorQuotesMatches(t *testing.T) {
+	e := &AmbiguousDeviceError{
+		ID:      "usb:16d0:06f3:s=DUP:if=0,0",
+		Matches: []string{twinPort3ID, "hw:2,0"},
+	}
+	got := e.Error()
+	for _, want := range []string{strconv.Quote(twinPort3ID), strconv.Quote("hw:2,0")} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Error() = %q, want it to contain the quoted match %s", got, want)
+		}
 	}
 }

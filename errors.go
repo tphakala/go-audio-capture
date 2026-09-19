@@ -3,6 +3,7 @@ package capture
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -82,7 +83,14 @@ func (e *AmbiguousDeviceError) Error() string {
 	if len(e.Matches) == 0 {
 		return fmt.Sprintf("capture: device id %q matches multiple devices; pin one by its PortID", e.ID)
 	}
-	return fmt.Sprintf("capture: device id %q matches %d devices (%s); pin one by its PortID", e.ID, len(e.Matches), strings.Join(e.Matches, ", "))
+	// Each match is quoted because every id form carries a comma before the
+	// device number, so a bare comma-joined list cannot be split back apart by
+	// eye or by a script.
+	quoted := make([]string, 0, len(e.Matches))
+	for _, m := range e.Matches {
+		quoted = append(quoted, strconv.Quote(m))
+	}
+	return fmt.Sprintf("capture: device id %q matches %d devices (%s); pin one by its PortID", e.ID, len(e.Matches), strings.Join(quoted, ", "))
 }
 
 // BadRateError reports that the hardware does not support the exact requested
