@@ -522,9 +522,9 @@ func TestResolveEnumerationFailureIsDeviceGone(t *testing.T) {
 }
 
 // TestResolveAmbiguousFallsBackToHWAddr covers the other half of the ambiguity
-// message. Matches normally carries PortIDs, because that is what the message
-// tells the user to pin, but a twin whose port cannot be derived has no PortID
-// and must still be named: an empty entry would leave the user with a list they
+// message. Matches normally carries PortIDs, which pin the physical port and
+// survive a reboot, but a twin whose port cannot be derived has no PortID and
+// must still be named: an empty entry would leave the user with a list they
 // cannot act on.
 func TestResolveAmbiguousFallsBackToHWAddr(t *testing.T) {
 	withPort := serialCard(1, "DUPLICATE", "3")
