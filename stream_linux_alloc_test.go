@@ -11,7 +11,7 @@ func TestStreamReadAllocFree(t *testing.T) {
 	restore := swapOpenPCM(fp)
 	defer restore()
 
-	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS16LE})
+	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 2, Format: FormatS16LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

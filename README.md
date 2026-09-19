@@ -38,10 +38,17 @@ The Linux backend talks directly to the ALSA PCM character devices under `/dev/s
 Policy: no silent resampling or format conversion. The requested rate is honored exactly or `Open` fails with `*BadRateError`, so what the hardware negotiates is exactly what `Read` delivers, and `Stream.Negotiated` reports it honestly.
 
 ```go
-devs, _ := capture.Devices() // []DeviceInfo{ID: "hw:1,0", Name: ...}
+devs, err := capture.Devices()
+if err != nil {
+    log.Fatal(err)
+}
+if len(devs) == 0 {
+    log.Fatal("no capture devices found")
+}
+// devs[0].ID: "usb:16d0:06f3:s=0384_2474750763FA81C9:if=0,0", HWAddr: "hw:2,0", ...
 
 s, err := capture.Open(capture.Config{
-    Device:   "hw:1,0",
+    Device:   devs[0].ID, // persist this, not the hw: address
     Rate:     256000, // exact; a rate the device cannot do fails, never silently substitutes
     Channels: 1,
     Format:   capture.FormatS16LE,
@@ -69,12 +76,55 @@ for {
 
 `Read` is single-consumer and blocking; `Close` may be called from another goroutine to unblock it. Overruns (xruns) are recovered internally and counted via `Stream.Xruns()`.
 
+### Device ids are stable
+
+`DeviceInfo.ID` is the field to persist. ALSA card indices follow kernel probe order, so `hw:1,0` can name a different microphone after a reboot or a replug: plug two USB mics in and they can trade indices, and an application that stored `hw:1,0` then opens the wrong one. On Linux the id is therefore derived from sysfs and survives that, in one of three forms:
+
+| Card | Id | Example |
+|---|---|---|
+| USB with a serial | `usb:<vid>:<pid>:s=<serial>:if=<n>,<dev>` | `usb:16d0:06f3:s=0384_2474750763FA81C9:if=0,0` |
+| USB without a serial | `usb:<vid>:<pid>:p=<controller>-<devpath>:if=<n>,<dev>` | `usb:1686:067f:p=0000:00:14.0-3:if=0,0` |
+| Non-USB | `hw:CARD=<card id>,DEV=<dev>` (alsa-lib syntax) | `hw:CARD=Loopback,DEV=1` |
+
+A device with a serial is keyed on the serial, so it keeps its id when moved to another port. One without a serial is keyed on the physical port instead, which keeps two identical units apart; `vid:pid` stays in the port form so a different model moved onto that port reports not-found rather than being opened as if it were the expected device. Bytes outside `[A-Za-z0-9._-]` are percent-escaped in both the serial and the port value, with the port keeping `:` raw so a PCI controller address stays readable. The USB bus number is deliberately unused, because bus numbers follow controller probe order.
+
+The `hw:CARD=` form is only as unique as the kernel card id it carries. The kernel disambiguates two identical non-USB cards by suffixing the second (`PCH` and `PCH_1`) in probe order, so for duplicate non-USB cards this form inherits the same probe-order instability the USB forms are built to avoid; a bus-address-based non-USB id is tracked as future work.
+
+The id falls back to `hw:N,D` with `IDStable` false whenever no stable form can be built: sysfs cannot be read (a container with a partial `/sys`), or a USB card reports no serial and no derivable port, or a non-USB card has no kernel card id. A false `IDStable` is the signal not to persist it.
+
+`Config.Device` accepts any of these, and still accepts a plain `hw:card,device` for interactive use. A stable id is resolved on every `Open`, `SupportedRates`, and `SupportedRatesVerified` call, never cached, and re-checked once more after the device is open, so a card swapped in the window between resolving and opening is caught rather than recorded. `Resolve` answers the same question without opening anything:
+
+```go
+var amb *capture.AmbiguousDeviceError
+d, err := capture.Resolve(persistedID)
+switch {
+case errors.As(err, &amb): // *AmbiguousDeviceError
+    // Two units report the same serial. Pin one with its PortID; the library
+    // will not guess, because opening a coin-flip device is the failure a
+    // stable id exists to prevent.
+case errors.Is(err, capture.ErrDeviceGone):
+    // *DeviceNotFoundError: the hardware is not attached right now.
+case err == nil:
+    log.Printf("%s is currently %s", d.Name, d.HWAddr)
+}
+```
+
+On Linux `DeviceInfo.HWAddr` is the current-boot `hw:card,device` for display, logs, and `arecord`; it is not stable and must not be persisted. (On Windows HWAddr equals the endpoint id, which is stable; see the Windows section.)
+
+### Upgrading from v0.5.x
+
+`DeviceInfo.ID` changed meaning on Linux in this release. In v0.5.x it was the current-boot `hw:card,device` address; it is now the sysfs-derived stable id described above. This is a behaviour change with no signature change, so `go get -u` picks it up silently across the v0 minor. Three things to check:
+
+- A value your application persisted under v0.5.x is a `hw:card,device` string. It still opens, because `Config.Device` accepts the current-boot form for interactive use. But it no longer equals any `Devices()[i].ID`, so code that recognises a saved device by scanning for `ID == saved` stops matching. Compare the saved value against `DeviceInfo.HWAddr` instead, or pass it to `Resolve` to find the device and read its new stable `ID` to persist going forward.
+- The new `ID` for a USB card is not valid `arecord` syntax (`arecord -D usb:16d0:...` does not parse). For an external tool that wants an ALSA device string, use `DeviceInfo.HWAddr` (the `hw:card,device` form), not `ID`.
+- Unkeyed `DeviceInfo{...}` composite literals no longer compile, because the struct gained fields (`HWAddr`, `IDStable`, `PortID`, `CardID`, `USB`). Switch to keyed fields (`DeviceInfo{ID: ..., Name: ...}`), which is the form that survives a struct gaining fields.
+
 To discover which rates a device supports before opening it (e.g. to pick a capture rate, or to offer the user a menu), `SupportedRates` probes the device with the `HW_REFINE` ioctl only. It opens the device once (non-blocking) and issues one refine per candidate rate; it never runs `HW_PARAMS`, `PREPARE`, or `START`, so it does not move the device out of its current state and does not disturb a stream another process holds. A single refine reports only the continuous `[Min, Max]` window, so each standard rate inside that window is probed individually to reveal discrete gaps.
 
 ```go
-rs, err := capture.SupportedRates("hw:1,0", 2, capture.FormatS32LE)
-// rs.Rates == []int{44100, 48000, 88200, 96000}   // discrete, ascending
-// rs.Min, rs.Max == 44100, 96000                  // raw HW_REFINE window
+rs, err := capture.SupportedRates(devs[0].ID, 1, capture.FormatS16LE)
+// rs.Rates == []int{192000, 256000, 384000}       // discrete, ascending
+// rs.Min, rs.Max == 192000, 384000                // raw HW_REFINE window
 ```
 
 If the device is held exclusively by another process the query returns `ErrDeviceInUse`; a channel/format combination the hardware cannot do at any rate returns `*BadFormatError`; a removed device returns `ErrDeviceGone`. In each case the caller should fall back to a static rate list. `SupportedRates` is Linux-only for now and returns `ErrCapabilitiesUnsupported` on other platforms.
@@ -83,7 +133,8 @@ If the device is held exclusively by another process the query returns `ErrDevic
 
 ```
 go run ./cmd/gac-rec -list
-go run ./cmd/gac-rec -d hw:1,0 -r 256000 -c 1 -f s16 -t 10s -o out.wav
+go run ./cmd/gac-rec -d 'usb:16d0:06f3:s=0384_2474750763FA81C9:if=0,0' -r 256000 -c 1 -f s16 -t 10s -o out.wav
+go run ./cmd/gac-rec -d hw:1,0 -r 256000 -c 1 -f s16 -t 10s -o out.wav   # the unstable address still works
 ```
 
 Validated against the `snd-aloop` loopback (the same kernel ioctl path as a physical card) at 48/192/384 kHz S16 and 48 kHz S32, FFT-verified: a 60 kHz tone at 384 kHz round-trips with all spectral energy above 24 kHz and zero xruns, the exact ultrasonic case dsnoop broke. Field validation on real arm64 hardware with an ultrasonic USB mic is tracked in the tracker.
@@ -94,7 +145,7 @@ Architectures: the Linux backend supports the little-endian LP64 arches (`amd64`
 
 The Windows backend talks to WASAPI through hand-rolled COM over `golang.org/x/sys/windows` (no cgo, no third-party COM or audio dependency), the Windows analog of the ALSA backend. It captures in **exclusive mode only** (`AUDCLNT_SHAREMODE_EXCLUSIVE`), the WASAPI equivalent of ALSA `hw:` access: the format is negotiated directly with the endpoint. Shared mode is deliberately unsupported, because the OS mixer resamples to the engine mix rate and converts the sample format behind the caller's back, the same silent conversion the library exists to avoid. `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` is never used.
 
-The public API is identical to Linux; only the device string differs. `DeviceInfo.ID` holds the opaque WASAPI endpoint-id string (`Card`/`Device` are Linux-only), and `Config.Device` takes that string, or `""` / `"default"` for the default capture endpoint. The requested rate, channel count, and sample format are negotiated exactly or `Open` fails with a typed error:
+The public API is identical to Linux; only the device string differs. `DeviceInfo.ID` holds the opaque WASAPI endpoint-id string, which is also reported as `HWAddr` with `IDStable` true (Windows has no separate unstable address as Linux does); `Card`, `Device`, `CardID`, `PortID`, and `USB` are Linux-only and stay at their zero values. `Config.Device` takes that endpoint-id string, or `""` / `"default"` for the default capture endpoint. The requested rate, channel count, and sample format are negotiated exactly or `Open` fails with a typed error:
 
 - `*BadRateError`: the exact rate is unsupported (carries the endpoint's supported range when it can be determined).
 - `*BadFormatError`: the channel-count / sample-format combination is unsupported. Exclusive endpoints commonly accept only specific layouts (e.g. stereo S16 but not mono), and the library returns this rather than up/down-mixing or converting.

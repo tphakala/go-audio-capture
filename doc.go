@@ -19,13 +19,20 @@
 //     substituting a different rate.
 //   - Typed errors wrap errno and name the failing ioctl, never an opaque
 //     "invalid argument".
+//   - Device ids are stable. When DeviceInfo.IDStable is true, DeviceInfo.ID
+//     survives a reboot and a replug, so an application can persist it and keep
+//     opening the same physical hardware; on Linux it is derived from sysfs
+//     rather than from the ALSA card index, which follows kernel probe order.
+//     When no stable form can be derived IDStable is false and ID is only a
+//     current-boot address that must not be persisted. Resolve reports what an
+//     id currently names without opening it.
 //
 // SupportedRates queries which sample rates a device accepts for a given
 // channel count and format, using the ALSA HW_REFINE ioctl only (no state
 // transition, so it does not disturb a device another process holds). It is
 // Linux-only and returns ErrCapabilitiesUnsupported on other platforms.
 //
-// The public API (Devices, Open, Stream, SupportedRates) is platform-neutral;
+// The public API (Devices, Resolve, Open, Stream, SupportedRates) is platform-neutral;
 // the Linux ALSA implementation lives in the *_linux.go files and internal/alsa,
 // and the Windows WASAPI implementation in the *_windows.go files and
 // internal/wasapi. A macOS CoreAudio backend is planned.

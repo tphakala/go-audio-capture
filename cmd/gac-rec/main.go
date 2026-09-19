@@ -14,13 +14,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/tphakala/go-audio-capture"
 )
 
 func main() {
-	device := flag.String("d", defaultDevice, "capture device id (Linux: hw:card,device; Windows: WASAPI endpoint id, or empty/\"default\")")
+	device := flag.String("d", defaultDevice, "capture device id (Linux: a stable id from -list, or hw:card,device; Windows: WASAPI endpoint id, or empty/\"default\")")
 	rate := flag.Int("r", 48000, "sample rate in Hz")
 	channels := flag.Int("c", 1, "channel count")
 	format := flag.String("f", "s16", "sample format: s16, s32, or f32")
@@ -45,10 +46,36 @@ func listDevices() error {
 	if err != nil {
 		return err
 	}
-	for _, d := range devs {
-		fmt.Printf("%-10s %s\n", d.ID, d.Name)
+	// Every row has the same four tab-separated fields so the listing can be
+	// cut or awk'd: id, current-boot address, notes, name. The address repeats
+	// the id on Windows and on a Linux card sysfs could not identify; it is
+	// printed anyway rather than left blank, so the column always means the
+	// same thing.
+	for i := range devs {
+		d := &devs[i]
+		fmt.Printf("%s\t%s\t%s\t%s\n", d.ID, d.HWAddr, listNotes(d), d.Name)
 	}
 	return nil
+}
+
+// listNotes flags the two cases a user has to act on. An unstable id is the
+// current-boot address wearing the id's clothes: persisting it is exactly the
+// bug stable ids exist to prevent, and nothing else in the row says so. A
+// PortID that differs from the id is the escape hatch for two units reporting
+// one serial, which is otherwise only discoverable by triggering the ambiguity
+// error.
+func listNotes(d *capture.DeviceInfo) string {
+	var notes []string
+	if !d.IDStable {
+		notes = append(notes, "unstable, do not persist")
+	}
+	if d.PortID != "" && d.PortID != d.ID {
+		notes = append(notes, "port="+d.PortID)
+	}
+	if len(notes) == 0 {
+		return "-"
+	}
+	return strings.Join(notes, "; ")
 }
 
 func record(device string, rate, channels int, format string, dur time.Duration, out string) error {

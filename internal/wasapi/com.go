@@ -26,6 +26,10 @@ const (
 	sFALSE hresult = 0x00000001
 
 	hrRPCChangedMode hresult = 0x80010106 // RPC_E_CHANGED_MODE
+	// E_NOTFOUND, HRESULT_FROM_WIN32(ERROR_NOT_FOUND). GetDefaultAudioEndpoint
+	// returns it when no endpoint of the requested role exists, and GetDevice
+	// when the named endpoint id is not present: both mean the device is gone.
+	hrNotFound hresult = 0x80070490
 
 	// AUDCLNT_E_* values are MAKE_HRESULT(SEVERITY_ERROR, FACILITY_AUDCLNT=0x889, n),
 	// so the low byte is the audioclient.h ordinal n.

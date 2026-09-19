@@ -62,7 +62,7 @@ func TestSupportedRatesHappyPath(t *testing.T) {
 		return fake, nil
 	})
 
-	got, err := SupportedRates("hw:1,0", 1, FormatS32LE)
+	got, err := SupportedRates(hwAddrCard1, 1, FormatS32LE)
 	if err != nil {
 		t.Fatalf("SupportedRates: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestSupportedRatesVerifiedDropsRefineLie(t *testing.T) {
 	}
 	withOpenRatePCM(t, func(int, int) (ratePCM, error) { return fake, nil })
 
-	got, err := SupportedRatesVerified("hw:2,0", 1, FormatS32LE)
+	got, err := SupportedRatesVerified(hwAddrCard2, 1, FormatS32LE)
 	if err != nil {
 		t.Fatalf("SupportedRatesVerified: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestSupportedRatesVerifiedEmptyAdvertisedSkipsProbe(t *testing.T) {
 	fake := &fakeRatePCM{rates: nil, lo: 500000, hi: 768000}
 	withOpenRatePCM(t, func(int, int) (ratePCM, error) { return fake, nil })
 
-	got, err := SupportedRatesVerified("hw:2,0", 1, FormatS32LE)
+	got, err := SupportedRatesVerified(hwAddrCard2, 1, FormatS32LE)
 	if err != nil {
 		t.Fatalf("SupportedRatesVerified: %v", err)
 	}
@@ -244,3 +244,64 @@ type wrappedErrnoError struct{ err error }
 
 func (e *wrappedErrnoError) Error() string { return "alsa: " + e.err.Error() }
 func (e *wrappedErrnoError) Unwrap() error { return e.err }
+
+// TestSupportedRatesRejectsCardSwappedDuringOpen mirrors the streaming Open swap
+// for the capability query: the refine open's own post-open identity check must
+// reject a card swapped into the resolved index in the resolve-to-open window.
+// It pins the verifyCardIdentity call in supportedRatesAt: deleting it lets the
+// query report rates for the wrong card.
+func TestSupportedRatesRejectsCardSwappedDuringOpen(t *testing.T) {
+	proc, sys := buildFixture(t, hostLayout())
+	setRoots(t, proc, sys)
+
+	// After the query open, card 2 is a different unit than the AudioMoth that
+	// resolved: the two USB cards traded indices.
+	_, swappedSys := buildFixture(t, []fakeCard{
+		loopbackCard(0),
+		serialCard(1, audiomothSerial, "2"),
+		portCard(2, "3"),
+	})
+	withOpenRatePCM(t, func(_, _ int) (ratePCM, error) {
+		sysRoot = swappedSys
+		return &fakeRatePCM{rates: []int{48000}, lo: 48000, hi: 48000}, nil
+	})
+
+	_, err := SupportedRates(wantSerialID, 1, FormatS16LE)
+	if !errors.Is(err, ErrDeviceGone) {
+		t.Fatalf("SupportedRates err = %v, want ErrDeviceGone after a swap in the open window", err)
+	}
+}
+
+// TestSupportedRatesVerifiedRejectsCardSwappedPerCandidate pins the SECOND,
+// per-candidate verifyCardIdentity call in SupportedRatesVerified: the refine
+// pass runs clean, then the card is swapped before the first HW_PARAMS commit, so
+// only the per-candidate guard can catch it. Deleting that specific guard lets a
+// device swapped after the refine pass be verified as a different unit.
+func TestSupportedRatesVerifiedRejectsCardSwappedPerCandidate(t *testing.T) {
+	proc, sys := buildFixture(t, hostLayout())
+	setRoots(t, proc, sys)
+
+	_, swappedSys := buildFixture(t, []fakeCard{
+		loopbackCard(0),
+		serialCard(1, audiomothSerial, "2"),
+		portCard(2, "3"),
+	})
+	opens := 0
+	withOpenRatePCM(t, func(_, _ int) (ratePCM, error) {
+		opens++
+		if opens == 2 {
+			// Swap only after the refine pass has opened and verified cleanly, so
+			// the refine-pass guard cannot be what rejects the query.
+			sysRoot = swappedSys
+		}
+		return &fakeRatePCM{
+			rates: []int{48000}, lo: 48000, hi: 48000,
+			verifiable: map[int]bool{48000: true},
+		}, nil
+	})
+
+	_, err := SupportedRatesVerified(wantSerialID, 1, FormatS16LE)
+	if !errors.Is(err, ErrDeviceGone) {
+		t.Fatalf("SupportedRatesVerified err = %v, want ErrDeviceGone after a per-candidate swap", err)
+	}
+}

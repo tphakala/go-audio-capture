@@ -67,15 +67,85 @@ func ParseFormat(s string) (Format, error) {
 	}
 }
 
-// DeviceInfo identifies a capture-capable PCM device. ID is a stable,
-// platform-specific identifier that Config.Device accepts directly: on Linux the
-// human-usable "hw:card,device" string (never a hex-encoded token), on Windows
-// the WASAPI endpoint-id string. Card and Device are populated on Linux only.
+// DeviceInfo identifies a capture-capable PCM device.
+//
+// ID is a stable, platform-specific identifier that Config.Device accepts
+// directly, and it is the field to persist. When IDStable is true it survives a
+// reboot, a replug, and another device being added or removed; when IDStable is
+// false it is only a current-boot address that must not be persisted (see the
+// fallback below). On Windows it is the WASAPI endpoint-id string. On Linux it
+// is derived from sysfs and takes one of three forms:
+//
+//	usb:<vid>:<pid>:s=<serial>:if=<n>,<dev>          USB card with a serial
+//	usb:<vid>:<pid>:p=<controller>-<devpath>:if=<n>,<dev>  USB card without one
+//	hw:CARD=<card id>,DEV=<dev>                      non-USB card (alsa-lib syntax)
+//
+// The serial form names the unit and follows it to any port. The port form names
+// the physical port, so it changes if a serial-less device is moved to a
+// different port (a move a serial-bearing device rides out on its serial form).
+// Bytes outside [A-Za-z0-9._-] are percent-escaped in both the serial and the
+// port value; the port keeps ':' raw so a PCI controller address stays readable.
+//
+// ID falls back to the current-boot "hw:card,device" string with IDStable false
+// whenever no stable form can be built: sysfs cannot be read (a container with a
+// partial /sys), or a USB card reports no serial and no derivable port, or a
+// non-USB card has no kernel card id. Such an ID must not be persisted, because
+// the card index follows kernel probe order and changes across reboots and
+// replugs.
+//
+// HWAddr is the device's current-boot address, for display, logs, and passing
+// to other tools: on Linux the "hw:card,device" string that arecord takes, on
+// Windows the endpoint id (the same value as ID, since Windows has no separate
+// unstable address). On Linux it is not stable across reboots or replugs and
+// must not be persisted; persist ID instead.
+//
+// PortID is the port-form id for a USB card whose physical port could be
+// derived, and empty otherwise (a non-USB card, or a USB card with no derivable
+// port). It names the physical port rather than the unit, so use it to pin one
+// of two units that report the same serial, which ID cannot distinguish.
+//
+// CardID is the kernel card id ("Loopback", "AMS24"), empty for a card with no
+// kernel id or whose sysfs could not be read. USB carries the USB identity of a
+// USB card and is the zero value otherwise; IsUSB reports which. It is a value
+// rather than a pointer so that DeviceInfo stays comparable with ==, which
+// compares two pointers by address and would report two reads of the same device
+// as different.
+//
+// Card, Device, CardID, PortID, and USB are populated on Linux only.
 type DeviceInfo struct {
-	ID     string
-	Card   int
-	Device int
-	Name   string
+	ID       string
+	Card     int
+	Device   int
+	Name     string
+	HWAddr   string
+	IDStable bool
+	PortID   string
+	CardID   string
+	USB      USBInfo
+}
+
+// IsUSB reports whether the device sits behind USB, in which case USB carries at
+// least its vendor and product; USB.Serial and USB.Port are filled in when the
+// device reports them, but either can be empty.
+//
+//nolint:gocritic // hugeParam: a value receiver keeps IsUSB callable on a non-addressable DeviceInfo, such as a map element.
+func (d DeviceInfo) IsUSB() bool { return d.USB.VendorID != "" }
+
+// USBInfo is the USB identity behind a Linux capture card, as read from sysfs.
+// VendorID and ProductID are the four-digit lowercase hex idVendor and
+// idProduct. Serial is the device serial, empty when the device reports none.
+// Port is "<controller>-<devpath>", the physical attachment point: the host
+// controller's device name (a PCI address such as "0000:00:14.0", or a platform
+// name) joined to the USB devpath ("3", "1.4.2"). The USB bus number is
+// deliberately not used, because bus numbers follow controller probe order.
+// Interface is the bInterfaceNumber of the audio function, which distinguishes
+// the functions of a composite device.
+type USBInfo struct {
+	VendorID  string
+	ProductID string
+	Serial    string
+	Port      string
+	Interface int
 }
 
 // RateSupport reports which sample rates a device accepts for a given channel
@@ -95,9 +165,15 @@ type RateSupport struct {
 // Linux; on Windows (WASAPI exclusive mode) the endpoint dictates the buffer
 // period, so both fields are ignored and Negotiated reports the actual period.
 type Config struct {
-	Device       string // Linux "hw:card,device" (e.g. "hw:1,0"); Windows WASAPI endpoint id, or ""/"default"
-	Rate         int    // requested sample rate in Hz
-	Channels     int    // 1 or 2
+	// Device names the capture device. On Linux it accepts a DeviceInfo.ID in
+	// any of its stable forms ("usb:...", "hw:CARD=name,DEV=0"), which is what a
+	// caller should persist, and also the current-boot "hw:card,device" (or
+	// "card,device", or "hw:card") for interactive use. A stable id is resolved
+	// to a card index on every call, so it follows the hardware across reboots
+	// and replugs. On Windows it is the WASAPI endpoint id, or ""/"default".
+	Device       string
+	Rate         int // requested sample rate in Hz
+	Channels     int // 1 or 2
 	Format       Format
 	PeriodFrames int // frames per period; Linux: 0 => Rate/50 (20 ms); ignored on Windows
 	Periods      int // periods per buffer; Linux: 0 => 4; ignored on Windows

@@ -4,8 +4,6 @@ package capture
 
 import (
 	"errors"
-	"strconv"
-	"strings"
 	"sync/atomic"
 
 	"golang.org/x/sys/unix"
@@ -45,12 +43,15 @@ type Stream struct {
 // Open configures and opens a capture stream. It negotiates the exact requested
 // rate (failing with *BadRateError otherwise), applies the 20 ms / 4-period
 // defaults, and returns a stream that is prepared but not yet started; call
-// Start before Read. On failure it returns a typed error: *BadRateError for an
-// unsupported rate, *BadFormatError for an unsupported channel/format
-// combination, ErrDeviceInUse when another application holds the device, and
-// ErrDeviceGone when the device is missing or was removed.
+// Start before Read. On failure it returns a typed error: *BadDeviceError for a
+// malformed device id, *DeviceNotFoundError (which unwraps to ErrDeviceGone) when
+// a well-formed stable id matches no present device, *AmbiguousDeviceError when
+// it matches more than one, *BadRateError for an unsupported rate,
+// *BadFormatError for an unsupported channel/format combination, ErrDeviceInUse
+// when another application holds the device, and ErrDeviceGone when the device is
+// missing or was removed.
 func Open(cfg Config) (*Stream, error) {
-	card, device, err := parseDeviceID(cfg.Device)
+	r, err := resolveDevice(cfg.Device)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +74,7 @@ func Open(cfg Config) (*Stream, error) {
 		periods = alsa.DefaultPeriods
 	}
 
-	p, err := openPCM(card, device)
+	p, err := openPCM(r.card, r.device)
 	if err != nil {
 		// A device that is absent or removed at open time fails here (the PCM
 		// node is missing, or the driver reports the card gone). Classify it the
@@ -81,6 +82,14 @@ func Open(cfg Config) (*Stream, error) {
 		// errors.Is(err, ErrDeviceGone), and a busy device as ErrDeviceInUse,
 		// matching what SupportedRates and the Windows Open path already do.
 		return nil, translateOpenError(err, cfg.Channels, cfg.Format)
+	}
+	// Close the resolve-to-open window: between matching the id to a card index
+	// and opening it, that card could have been unplugged and another one taken
+	// the index. Confirm the card we are now holding is still the one asked for
+	// before any audio is read from it.
+	if err := verifyCardIdentity(r.card, r.device, r.verifyID); err != nil {
+		_ = p.Close()
+		return nil, err
 	}
 	n, err := p.Negotiate(cfg.Rate, cfg.Channels, format, periodFrames, periods)
 	if err != nil {
@@ -182,29 +191,6 @@ func (s *Stream) Close() error {
 		return nil
 	}
 	return s.pcm.Close()
-}
-
-// parseDeviceID accepts "hw:card,device", "card,device", or "hw:card" (device
-// defaulting to 0) and returns the card and device numbers.
-func parseDeviceID(s string) (card, device int, err error) {
-	orig := s
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "hw:")
-	cardStr, devStr, hasComma := strings.Cut(s, ",")
-	card, err = strconv.Atoi(strings.TrimSpace(cardStr))
-	if err != nil {
-		return 0, 0, &BadDeviceError{Value: orig}
-	}
-	if hasComma {
-		device, err = strconv.Atoi(strings.TrimSpace(devStr))
-		if err != nil {
-			return 0, 0, &BadDeviceError{Value: orig}
-		}
-	}
-	if card < 0 || device < 0 {
-		return 0, 0, &BadDeviceError{Value: orig}
-	}
-	return card, device, nil
 }
 
 func alsaFormat(f Format) (uint32, error) {

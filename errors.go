@@ -3,6 +3,7 @@ package capture
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrClosed is returned by Stream.Read once the stream has been closed.
@@ -18,10 +19,12 @@ var ErrExclusiveNotAllowed = errors.New("capture: exclusive access disabled for 
 var ErrDeviceInUse = errors.New("capture: device is in use by another application")
 
 // ErrDeviceGone reports that the device disappeared (unplugged, disabled, or
-// otherwise invalidated). Open, Start, and Read all return it when the device
-// is missing or removed, and SupportedRates returns it for a query against a
-// device that is gone, so a caller can retire the device with
-// errors.Is(err, ErrDeviceGone) at any point in the stream lifecycle.
+// otherwise invalidated). Open, Start, and Read all return it when the device is
+// missing or removed; SupportedRates and SupportedRatesVerified return it for a
+// query against a device that is gone; and Resolve returns it wrapped in a
+// *DeviceNotFoundError (which unwraps to it) when an id matches nothing present.
+// A caller can therefore retire the device with errors.Is(err, ErrDeviceGone) at
+// any point from resolution through the stream lifecycle.
 var ErrDeviceGone = errors.New("capture: device is gone")
 
 // ErrCapabilitiesUnsupported reports that device capability queries such as
@@ -29,14 +32,57 @@ var ErrDeviceGone = errors.New("capture: device is gone")
 // only). Callers should fall back to a static rate list.
 var ErrCapabilitiesUnsupported = errors.New("capture: capability query not supported on this platform")
 
-// BadDeviceError reports a device ID that is not a valid "hw:card,device"
-// (or "card,device", or "hw:card") string.
+// BadDeviceError reports a device id that is not in any accepted form. On Linux
+// those are the stable forms "usb:vid:pid:s=serial:if=n,dev",
+// "usb:vid:pid:p=port:if=n,dev" and "hw:CARD=name,DEV=dev", plus the
+// current-boot "hw:card,device" (or "card,device", or "hw:card"). The id is
+// malformed, as opposed to well-formed but not currently present, which is
+// *DeviceNotFoundError.
 type BadDeviceError struct {
 	Value string
 }
 
 func (e *BadDeviceError) Error() string {
-	return fmt.Sprintf("capture: invalid device id %q (want hw:card,device)", e.Value)
+	return fmt.Sprintf("capture: invalid device id %q (want hw:card,device, hw:CARD=name,DEV=dev, or usb:vid:pid:...)", e.Value)
+}
+
+// DeviceNotFoundError reports a well-formed device id that matches no device
+// currently present: the hardware it names is unplugged, powered off, or was
+// never attached to this machine. It unwraps to ErrDeviceGone, so a caller that
+// already retires a device with errors.Is(err, ErrDeviceGone) needs no change,
+// while one that wants to tell a resolve-time absence (an id that resolved to
+// nothing) from a runtime invalidation (a device lost mid-stream) can use
+// errors.As.
+type DeviceNotFoundError struct {
+	ID string
+}
+
+func (e *DeviceNotFoundError) Error() string {
+	return fmt.Sprintf("capture: no device matches id %q", e.ID)
+}
+
+// Unwrap reports ErrDeviceGone so errors.Is(err, ErrDeviceGone) holds.
+func (e *DeviceNotFoundError) Unwrap() error { return ErrDeviceGone }
+
+// AmbiguousDeviceError reports a device id that matches more than one device
+// present right now, which happens when two identical units report the same
+// serial. Matches carries the PortID of each matching device (falling back to
+// its current-boot "hw:card,device" address for a match that has no PortID), so
+// the caller can act on the remedy directly. The entries follow the order
+// Devices returns, which is by ascending card then device number, not lexical
+// order. The library never picks one: opening a coin-flip device is the very
+// failure a stable id exists to prevent. Resolve the ambiguity by pinning the
+// physical port with DeviceInfo.PortID instead.
+type AmbiguousDeviceError struct {
+	ID      string
+	Matches []string
+}
+
+func (e *AmbiguousDeviceError) Error() string {
+	if len(e.Matches) == 0 {
+		return fmt.Sprintf("capture: device id %q matches multiple devices; pin one by its PortID", e.ID)
+	}
+	return fmt.Sprintf("capture: device id %q matches %d devices (%s); pin one by its PortID", e.ID, len(e.Matches), strings.Join(e.Matches, ", "))
 }
 
 // BadRateError reports that the hardware does not support the exact requested

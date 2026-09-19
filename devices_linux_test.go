@@ -8,15 +8,17 @@ import (
 )
 
 func TestDevicesFromFixture(t *testing.T) {
-	got, err := devicesFrom(filepath.Join("testdata", "proc_asound"))
+	// The committed /proc fixture is paired with an absent sysfs root, so this
+	// exercises the identity-less fallback path: ids stay hw:N,D and say so.
+	got, err := devicesFrom(filepath.Join("testdata", "proc_asound"), absentSysRoot(t))
 	if err != nil {
 		t.Fatalf("devicesFrom: %v", err)
 	}
 	// card2 is playback-only (pcm0p), so it must not appear. Results are
 	// ordered by card then device, with the card longname as the Name.
 	want := []DeviceInfo{
-		{ID: "hw:0,0", Card: 0, Device: 0, Name: "HDA Intel PCH"},
-		{ID: "hw:1,0", Card: 1, Device: 0, Name: "C-Media USB Audio Device"},
+		{ID: hwAddrCard0, Card: 0, Device: 0, Name: "HDA Intel PCH", HWAddr: hwAddrCard0},
+		{ID: hwAddrCard1, Card: 1, Device: 0, Name: "C-Media USB Audio Device", HWAddr: hwAddrCard1},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("devicesFrom returned %d devices, want %d: %+v", len(got), len(want), got)
