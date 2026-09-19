@@ -53,7 +53,7 @@ type BadDeviceError struct {
 
 func (e *BadDeviceError) Error() string {
 	if e.Err != nil {
-		return fmt.Sprintf("capture: invalid device id %q: %s (want hw:card,device, hw:CARD=name,DEV=dev, or usb:vid:pid:...)", e.Value, e.Err)
+		return fmt.Sprintf("capture: invalid device id %q: %v (want hw:card,device, hw:CARD=name,DEV=dev, or usb:vid:pid:...)", e.Value, e.Err)
 	}
 	return fmt.Sprintf("capture: invalid device id %q (want hw:card,device, hw:CARD=name,DEV=dev, or usb:vid:pid:...)", e.Value)
 }

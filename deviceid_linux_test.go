@@ -536,6 +536,31 @@ func TestUSBPortStopsAtSysfsRoot(t *testing.T) {
 	}
 }
 
+// TestUSBPortStopsAtSymlinkedRoot pins the symlink normalization: readCardIdent
+// hands usbPort an EvalSymlinks-resolved device path but the raw sysfs root, so a
+// symlinked root must still bound the walk. The device path is given in resolved
+// form (as production does) while the root is a symlink to the same tree; without
+// resolving root to match, the walk would step over the boundary and name an
+// ancestor as the controller instead of returning no port.
+func TestUSBPortStopsAtSymlinkedRoot(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "realsys")
+	usbDev := filepath.Join(realRoot, "usbdev")
+	if err := os.MkdirAll(usbDev, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usbDev, "devpath"), []byte("3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkRoot := filepath.Join(base, "linksys")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Fatal(err)
+	}
+	if got := usbPort(linkRoot, usbDev); got != "" {
+		t.Errorf("usbPort with a symlinked root = %q, want empty (root must be resolved to bound the walk)", got)
+	}
+}
+
 // TestDevicesCardWithoutDeviceLink covers a virtual card whose sysfs node has
 // no bus device: the kernel card id alone still gives a stable name.
 func TestDevicesCardWithoutDeviceLink(t *testing.T) {

@@ -152,6 +152,19 @@ func readUSBIdent(root, devDir string) (*USBInfo, bool) {
 // is deliberately not used: bus numbers follow controller probe order and so
 // carry the very instability this id exists to avoid.
 func usbPort(root, usbDev string) string {
+	// Resolve the sysfs root and the device path to their symlink-free forms
+	// before the walk. readCardIdent hands us an EvalSymlinks-resolved device
+	// path but the raw root, so a symlinked root (or a symlinked ancestor of a
+	// test or container mount) would never equal a walk step, letting the walk
+	// step over the dir == root boundary below. Resolving both keeps them
+	// comparable; a resolve error (a path that does not exist) falls back to the
+	// raw value, which still compares correctly in the common case.
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		root = r
+	}
+	if d, err := filepath.EvalSymlinks(usbDev); err == nil {
+		usbDev = d
+	}
 	// A real read error on devpath is deliberately treated like its absence:
 	// both yield an empty port, which routes a serial-less card to the unstable
 	// hw:N,D fallback (IDStable=false) rather than to a confident but wrong id. A
