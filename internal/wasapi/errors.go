@@ -73,7 +73,7 @@ func (e *hresultError) Unwrap() error {
 		return ErrExclusiveNotAllowed
 	case hrDeviceInUse:
 		return ErrDeviceInUse
-	case hrDeviceInvalidated:
+	case hrDeviceInvalidated, hrNotFound:
 		return ErrDeviceGone
 	default:
 		return nil
@@ -97,6 +97,8 @@ func (h hresult) name() string {
 		return "AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED"
 	case hrDeviceInvalidated:
 		return "AUDCLNT_E_DEVICE_INVALIDATED"
+	case hrNotFound:
+		return "E_NOTFOUND"
 	case hrNotInitialized:
 		return "AUDCLNT_E_NOT_INITIALIZED"
 	case hrRPCChangedMode:

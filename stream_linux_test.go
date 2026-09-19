@@ -4,6 +4,7 @@ package capture
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,16 +13,33 @@ import (
 	"github.com/tphakala/go-audio-capture/internal/alsa"
 )
 
-// devID is the device string reused across the stream tests.
-const devID = "hw:1,0"
+// hwAddrCard0 and hwAddrCard1 are current-boot hw addresses, not stable ids:
+// the whole point of this change is that "hw:1,0" is a DeviceInfo.HWAddr, and a
+// device's ID is the sysfs-derived stable form instead. They are reused across
+// the Linux tests in several files (stream, devices, deviceid, and the alloc
+// test).
+const (
+	hwAddrCard0 = "hw:0,0"
+	hwAddrCard1 = "hw:1,0"
+	hwAddrCard2 = "hw:2,0"
+)
 
-func TestParseDeviceID(t *testing.T) {
+func TestResolveDeviceNumeric(t *testing.T) {
+	// The backward-compatibility promise for every id persisted under v0.5.x: a
+	// numeric id must resolve, and open, WITHOUT consulting /proc or /sys at all,
+	// so it keeps working on a system where neither can be read. Point both roots
+	// at paths that do not exist; if resolution ever starts enumerating for a
+	// numeric id, these cases fail (the reads error) instead of silently
+	// regressing. setRoots mutates package vars, so no t.Parallel here.
+	tmp := t.TempDir()
+	setRoots(t, filepath.Join(tmp, "no-proc"), filepath.Join(tmp, "no-sys"))
+
 	tests := []struct {
 		in        string
 		card, dev int
 		wantErr   bool
 	}{
-		{"hw:1,0", 1, 0, false},
+		{hwAddrCard1, 1, 0, false},
 		{"1,0", 1, 0, false},
 		{"hw:1", 1, 0, false},
 		{"hw:0,3", 0, 3, false},
@@ -33,29 +51,42 @@ func TestParseDeviceID(t *testing.T) {
 		{"-1,0", 0, 0, true},
 	}
 	for _, tt := range tests {
-		card, dev, err := parseDeviceID(tt.in)
+		r, err := resolveDevice(tt.in)
 		if tt.wantErr {
 			var bde *BadDeviceError
 			if !errors.As(err, &bde) {
-				t.Errorf("parseDeviceID(%q) err = %v, want *BadDeviceError", tt.in, err)
+				t.Errorf("resolveDevice(%q) err = %v, want *BadDeviceError", tt.in, err)
 			}
 			continue
 		}
-		if err != nil || card != tt.card || dev != tt.dev {
-			t.Errorf("parseDeviceID(%q) = (%d,%d,%v), want (%d,%d,nil)", tt.in, card, dev, err, tt.card, tt.dev)
+		if err != nil || r.card != tt.card || r.device != tt.dev {
+			t.Errorf("resolveDevice(%q) = (%d,%d,%v), want (%d,%d,nil)", tt.in, r.card, r.device, err, tt.card, tt.dev)
+		}
+		if r.verifyID != "" {
+			t.Errorf("resolveDevice(%q) verifyID = %q, want empty for a numeric id", tt.in, r.verifyID)
 		}
 	}
+
+	// A numeric id must also OPEN on such a system: verifyID is empty, so the
+	// post-open identity check reads nothing from sysfs either.
+	defer swapOpenPCM(&fakePCM{readFn: func() (int, error) { return 0, nil }})()
+	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS16LE})
+	if err != nil {
+		t.Fatalf("Open(%q) with unreadable /proc and /sys: %v", hwAddrCard1, err)
+	}
+	_ = s.Close()
 }
 
 // fakePCM implements the pcm seam so Open/Read/Close are testable with no
 // hardware.
 type fakePCM struct {
-	negErr    error // when set, Negotiate returns it
-	startErr  error // when set, Start returns it
-	readFn    func() (int, error)
-	recoverFn func(error) error // overrides Recover when set
-	recovered int
-	block     chan struct{} // closed by Close to unblock a parked ReadI
+	negErr     error // when set, Negotiate returns it
+	startErr   error // when set, Start returns it
+	readFn     func() (int, error)
+	recoverFn  func(error) error // overrides Recover when set
+	recovered  int
+	block      chan struct{} // closed by Close to unblock a parked ReadI
+	closeCalls int
 }
 
 func (f *fakePCM) Negotiate(rate, channels int, format uint32, periodFrames, periods int) (alsa.Negotiated, error) {
@@ -80,6 +111,7 @@ func (f *fakePCM) Recover(err error) error {
 	return err
 }
 func (f *fakePCM) Close() error {
+	f.closeCalls++
 	if f.block != nil {
 		close(f.block)
 	}
@@ -90,6 +122,17 @@ func swapOpenPCM(p pcm) func() {
 	prev := openPCM
 	openPCM = func(_, _ int) (pcm, error) { return p, nil }
 	return func() { openPCM = prev }
+}
+
+// withOpenPCM swaps the openPCM seam for the duration of one test, mirroring
+// withOpenRatePCM for the sibling ratePCM seam. It suits a test that needs the
+// card and device arguments (to drive an identity swap in the open window),
+// where swapOpenPCM's argument-ignoring fake does not.
+func withOpenPCM(t *testing.T, fn func(card, device int) (pcm, error)) {
+	t.Helper()
+	prev := openPCM
+	openPCM = fn
+	t.Cleanup(func() { openPCM = prev })
 }
 
 // swapOpenPCMError makes openPCM itself fail (device absent, removed, or busy at
@@ -147,7 +190,7 @@ func TestAlsaFormat(t *testing.T) {
 // and the negotiated config echoes f32 at 4 bytes per sample.
 func TestOpenFloat32Negotiated(t *testing.T) {
 	defer swapOpenPCM(&fakePCM{readFn: func() (int, error) { return 0, nil }})()
-	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatF32LE})
+	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatF32LE})
 	if err != nil {
 		t.Fatalf("Open f32: %v", err)
 	}
@@ -170,7 +213,7 @@ func TestReadRecoversXrun(t *testing.T) {
 		return 480, nil // retry succeeds
 	}}
 	defer swapOpenPCM(f)()
-	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatS16LE})
+	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS16LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -194,7 +237,7 @@ func TestCloseUnblocksRead(t *testing.T) {
 		return 0, unix.EBADF
 	}
 	defer swapOpenPCM(f)()
-	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatS16LE})
+	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS16LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -216,7 +259,7 @@ func TestCloseUnblocksRead(t *testing.T) {
 
 func TestReadAfterCloseReturnsErrClosed(t *testing.T) {
 	defer swapOpenPCM(&fakePCM{readFn: func() (int, error) { return 0, nil }})()
-	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatS16LE})
+	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS16LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -235,7 +278,7 @@ func TestReadMapsRecoverEBADFToErrClosed(t *testing.T) {
 		recoverFn: func(error) error { return &recoverError{unix.EBADF} },
 	}
 	defer swapOpenPCM(fp)()
-	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatS16LE})
+	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS16LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -262,7 +305,7 @@ func TestReadMapsDeviceGoneToErrDeviceGone(t *testing.T) {
 		t.Run(errno.Error(), func(t *testing.T) {
 			fp := &fakePCM{readFn: func() (int, error) { return 0, &recoverError{errno} }}
 			defer swapOpenPCM(fp)()
-			s, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatS16LE})
+			s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS16LE})
 			if err != nil {
 				t.Fatalf("Open: %v", err)
 			}
@@ -282,7 +325,7 @@ func TestReadMapsDeviceGoneToErrDeviceGone(t *testing.T) {
 func TestReadPassesThroughNonDeviceGoneError(t *testing.T) {
 	fp := &fakePCM{readFn: func() (int, error) { return 0, &recoverError{unix.EIO} }}
 	defer swapOpenPCM(fp)()
-	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatS16LE})
+	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS16LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -303,7 +346,7 @@ func TestReadPassesThroughNonDeviceGoneError(t *testing.T) {
 func TestOpenMapsUnsupportedFormat(t *testing.T) {
 	fp := &fakePCM{negErr: &alsa.BadFormatError{Channels: 1, Format: alsa.FormatS16LE}}
 	defer swapOpenPCM(fp)()
-	_, err := Open(Config{Device: devID, Rate: 48000, Channels: 1, Format: FormatS16LE})
+	_, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS16LE})
 	var bfe *BadFormatError
 	if !errors.As(err, &bfe) {
 		t.Fatalf("Open with unsupported format = %v, want *BadFormatError", err)
@@ -318,7 +361,7 @@ func TestOpenMapsUnsupportedFormat(t *testing.T) {
 func TestOpenMapsBadRate(t *testing.T) {
 	fp := &fakePCM{negErr: &alsa.BadRateError{Requested: 256000, Min: 44100, Max: 96000}}
 	defer swapOpenPCM(fp)()
-	_, err := Open(Config{Device: devID, Rate: 256000, Channels: 2, Format: FormatS32LE})
+	_, err := Open(Config{Device: hwAddrCard1, Rate: 256000, Channels: 2, Format: FormatS32LE})
 	var bre *BadRateError
 	if !errors.As(err, &bre) {
 		t.Fatalf("Open with bad rate = %v, want *BadRateError", err)
@@ -337,7 +380,7 @@ func TestOpenMapsDeviceGone(t *testing.T) {
 		t.Run(errno.Error(), func(t *testing.T) {
 			fp := &fakePCM{negErr: &recoverError{errno}}
 			defer swapOpenPCM(fp)()
-			_, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+			_, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 2, Format: FormatS32LE})
 			if !errors.Is(err, ErrDeviceGone) {
 				t.Errorf("Open with %v = %v, want ErrDeviceGone", errno, err)
 			}
@@ -351,7 +394,7 @@ func TestOpenMapsDeviceGone(t *testing.T) {
 func TestOpenPassesThroughOtherError(t *testing.T) {
 	fp := &fakePCM{negErr: &recoverError{unix.EIO}}
 	defer swapOpenPCM(fp)()
-	_, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	_, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 2, Format: FormatS32LE})
 	if errors.Is(err, ErrDeviceGone) {
 		t.Errorf("Open with EIO = %v, want it passed through, not ErrDeviceGone", err)
 	}
@@ -369,7 +412,7 @@ func TestOpenMapsOpenTimeDeviceGone(t *testing.T) {
 	for _, errno := range []unix.Errno{unix.ENODEV, unix.ENXIO, unix.ENOENT} {
 		t.Run(errno.Error(), func(t *testing.T) {
 			defer swapOpenPCMError(&recoverError{errno})()
-			_, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+			_, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 2, Format: FormatS32LE})
 			if !errors.Is(err, ErrDeviceGone) {
 				t.Errorf("Open with openPCM %v = %v, want ErrDeviceGone", errno, err)
 			}
@@ -383,7 +426,7 @@ func TestOpenMapsOpenTimeDeviceGone(t *testing.T) {
 // condition.
 func TestOpenMapsOpenTimeBusy(t *testing.T) {
 	defer swapOpenPCMError(&recoverError{unix.EBUSY})()
-	_, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	_, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 2, Format: FormatS32LE})
 	if !errors.Is(err, ErrDeviceInUse) {
 		t.Errorf("Open with openPCM EBUSY = %v, want ErrDeviceInUse", err)
 	}
@@ -394,7 +437,7 @@ func TestOpenMapsOpenTimeBusy(t *testing.T) {
 // surface unchanged, not be relabelled device-gone or device-in-use.
 func TestOpenPassesThroughOpenTimeOtherError(t *testing.T) {
 	defer swapOpenPCMError(&recoverError{unix.EACCES})()
-	_, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	_, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 2, Format: FormatS32LE})
 	if errors.Is(err, ErrDeviceGone) || errors.Is(err, ErrDeviceInUse) {
 		t.Errorf("Open with openPCM EACCES = %v, want it passed through", err)
 	}
@@ -407,7 +450,7 @@ func TestOpenPassesThroughOpenTimeOtherError(t *testing.T) {
 // return nil and not be tripped by the error-classification arms.
 func TestStartSucceeds(t *testing.T) {
 	defer swapOpenPCM(&fakePCM{})()
-	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 2, Format: FormatS32LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -421,7 +464,7 @@ func TestStartSucceeds(t *testing.T) {
 // closed stream returns ErrClosed without touching the device.
 func TestStartAfterCloseReturnsErrClosed(t *testing.T) {
 	defer swapOpenPCM(&fakePCM{startErr: &recoverError{unix.ENODEV}})()
-	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 2, Format: FormatS32LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -439,7 +482,7 @@ func TestStartMapsDeviceGone(t *testing.T) {
 		t.Run(errno.Error(), func(t *testing.T) {
 			fp := &fakePCM{startErr: &recoverError{errno}}
 			defer swapOpenPCM(fp)()
-			s, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+			s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 2, Format: FormatS32LE})
 			if err != nil {
 				t.Fatalf("Open: %v", err)
 			}
@@ -456,7 +499,7 @@ func TestStartMapsDeviceGone(t *testing.T) {
 func TestStartMapsEBADFToErrClosed(t *testing.T) {
 	fp := &fakePCM{startErr: &recoverError{unix.EBADF}}
 	defer swapOpenPCM(fp)()
-	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 2, Format: FormatS32LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -471,7 +514,7 @@ func TestStartMapsEBADFToErrClosed(t *testing.T) {
 func TestStartPassesThroughOtherError(t *testing.T) {
 	fp := &fakePCM{startErr: &recoverError{unix.EIO}}
 	defer swapOpenPCM(fp)()
-	s, err := Open(Config{Device: devID, Rate: 48000, Channels: 2, Format: FormatS32LE})
+	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 2, Format: FormatS32LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -508,9 +551,9 @@ func TestOpenRejectsBadConfig(t *testing.T) {
 	defer swapOpenPCM(&fakePCM{readFn: func() (int, error) { return 0, nil }})()
 	tests := []Config{
 		{Device: "nonsense", Rate: 48000, Channels: 1, Format: FormatS16LE},
-		{Device: devID, Rate: 0, Channels: 1, Format: FormatS16LE},
-		{Device: devID, Rate: 48000, Channels: 0, Format: FormatS16LE},
-		{Device: devID, Rate: 48000, Channels: 1, Format: Format(99)},
+		{Device: hwAddrCard1, Rate: 0, Channels: 1, Format: FormatS16LE},
+		{Device: hwAddrCard1, Rate: 48000, Channels: 0, Format: FormatS16LE},
+		{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: Format(99)},
 	}
 	for _, cfg := range tests {
 		if _, err := Open(cfg); err == nil {

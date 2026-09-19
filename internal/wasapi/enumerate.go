@@ -84,9 +84,34 @@ func Enumerate() ([]Endpoint, error) {
 	return out, nil
 }
 
+// DefaultCaptureEndpoint returns the id and friendly name of the default
+// console capture endpoint, the one Open uses for an empty or "default" device
+// id. It exists so a caller can learn which endpoint that alias currently names
+// without opening it; the default cannot be found by scanning Enumerate,
+// because WASAPI picks it by role rather than by position.
+func DefaultCaptureEndpoint() (Endpoint, error) {
+	enum, err := createEnumerator()
+	if err != nil {
+		return Endpoint{}, err
+	}
+	defer release(enum)
+
+	dev, err := resolveDevice(enum, "")
+	if err != nil {
+		return Endpoint{}, err
+	}
+	defer release(dev)
+
+	id, err := deviceID(dev)
+	if err != nil {
+		return Endpoint{}, err
+	}
+	return Endpoint{ID: id, Name: deviceFriendlyName(dev)}, nil
+}
+
 // resolveDevice returns a device pointer for the given endpoint id, or the
 // default capture endpoint when id is "" or "default". The caller must release
-// the returned device. It is used by Open.
+// the returned device. It is used by Open and by DefaultCaptureEndpoint.
 func resolveDevice(enum unsafe.Pointer, id string) (unsafe.Pointer, error) {
 	if id == "" || id == "default" {
 		var dev unsafe.Pointer

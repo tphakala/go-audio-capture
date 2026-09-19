@@ -46,27 +46,53 @@ var standardRates = []int{
 // If the device is held exclusively by another process the open itself fails
 // and the returned error is ErrDeviceInUse; a missing or removed device yields
 // ErrDeviceGone; a channel count or format the device does not support at any
-// rate yields *BadFormatError. In the ErrDeviceInUse and ErrDeviceGone cases the
-// caller should fall back to a static rate list rather than treating the query
-// as authoritative.
+// rate yields *BadFormatError. Resolving the device id can also fail before any
+// open, with *BadDeviceError for a malformed id, *DeviceNotFoundError (which
+// unwraps to ErrDeviceGone) when a stable id matches nothing present, or
+// *AmbiguousDeviceError when it matches more than one. In the ErrDeviceInUse and
+// ErrDeviceGone cases the caller should fall back to a static rate list rather
+// than treating the query as authoritative.
 func SupportedRates(device string, channels int, format Format) (RateSupport, error) {
-	card, dev, err := parseDeviceID(device)
+	r, af, err := resolveQuery(device, channels, format)
 	if err != nil {
 		return RateSupport{}, err
 	}
+	return supportedRatesAt(r, channels, format, af)
+}
+
+// resolveQuery resolves the device id and validates the channel count and
+// format once, so that a query which runs two passes over the same device
+// resolves it exactly once. Resolving per pass would let a device swapped in
+// between the passes be refined as one unit and verified as another.
+func resolveQuery(device string, channels int, format Format) (resolved, uint32, error) {
+	r, err := resolveDevice(device)
+	if err != nil {
+		return resolved{}, 0, err
+	}
 	if channels < 1 {
-		return RateSupport{}, &ConfigError{Field: "channels", Reason: "must be at least 1"}
+		return resolved{}, 0, &ConfigError{Field: "channels", Reason: "must be at least 1"}
 	}
 	af, err := alsaFormat(format)
 	if err != nil {
-		return RateSupport{}, err
+		return resolved{}, 0, err
 	}
+	return r, af, nil
+}
 
-	p, err := openRatePCM(card, dev)
+// supportedRatesAt runs the HW_REFINE pass against an already-resolved device.
+func supportedRatesAt(r resolved, channels int, format Format, af uint32) (RateSupport, error) {
+	p, err := openRatePCM(r.card, r.device)
 	if err != nil {
 		return RateSupport{}, translateQueryError(err)
 	}
 	defer func() { _ = p.Close() }()
+
+	// The short-lived query open races a replug exactly as a streaming open
+	// does, so it gets the same post-open identity check: rates reported for
+	// the wrong card are worse than no rates at all.
+	if err := verifyCardIdentity(r.card, r.device, r.verifyID); err != nil {
+		return RateSupport{}, err
+	}
 
 	rates, lo, hi, err := p.SupportedRates(channels, af, standardRates)
 	if err != nil {
@@ -83,10 +109,12 @@ func SupportedRates(device string, channels int, format Format) (RateSupport, er
 }
 
 // SupportedRatesVerified reports which standard sample rates the device can
-// actually COMMIT, not merely advertise. It runs SupportedRates first (a fast
-// HW_REFINE pass that yields the advertised window and a candidate filter), then
+// actually COMMIT, not merely advertise. It first runs the same HW_REFINE pass
+// as SupportedRates (yielding the advertised window and a candidate filter), then
 // re-opens the device once per candidate and issues a full HW_PARAMS commit to
-// confirm the hardware truly delivers that rate.
+// confirm the hardware truly delivers that rate. The device id is resolved once
+// and shared between the two passes, so a device swapped in between them cannot
+// be refined as one unit and verified as another.
 //
 // This exists because HW_REFINE over-reports on some USB Audio Class devices:
 // the driver advertises a continuous rate window (e.g. [48000, 384000]) yet only
@@ -101,7 +129,11 @@ func SupportedRates(device string, channels int, format Format) (RateSupport, er
 // missing device yields ErrDeviceInUse / ErrDeviceGone and the caller should
 // fall back to a static list.
 func SupportedRatesVerified(device string, channels int, format Format) (RateSupport, error) {
-	rs, err := SupportedRates(device, channels, format)
+	r, af, err := resolveQuery(device, channels, format)
+	if err != nil {
+		return RateSupport{}, err
+	}
+	rs, err := supportedRatesAt(r, channels, format, af)
 	if err != nil {
 		return RateSupport{}, err
 	}
@@ -109,32 +141,26 @@ func SupportedRatesVerified(device string, channels int, format Format) (RateSup
 		return rs, nil // nothing advertised: nothing to verify
 	}
 
-	card, dev, err := parseDeviceID(device)
-	if err != nil {
-		return RateSupport{}, err
-	}
-	af, err := alsaFormat(format)
-	if err != nil {
-		return RateSupport{}, err
-	}
-
 	verified := make([]int, 0, len(rs.Rates))
-	for _, r := range rs.Rates {
+	for _, rate := range rs.Rates {
 		// Scope the open in a closure so its Close is deferred: a panic in
 		// VerifyRate then still releases the fd rather than leaking it.
 		ok, verr := func() (bool, error) {
-			p, err := openRatePCM(card, dev)
+			p, err := openRatePCM(r.card, r.device)
 			if err != nil {
 				return false, err
 			}
 			defer func() { _ = p.Close() }()
-			return p.VerifyRate(channels, af, r)
+			if err := verifyCardIdentity(r.card, r.device, r.verifyID); err != nil {
+				return false, err
+			}
+			return p.VerifyRate(channels, af, rate)
 		}()
 		if verr != nil {
 			return RateSupport{}, translateQueryError(verr)
 		}
 		if ok {
-			verified = append(verified, r)
+			verified = append(verified, rate)
 		}
 	}
 	return RateSupport{Rates: verified, Min: rs.Min, Max: rs.Max}, nil
