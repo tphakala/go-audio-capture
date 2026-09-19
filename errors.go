@@ -72,8 +72,10 @@ func (e *DeviceNotFoundError) Unwrap() error { return ErrDeviceGone }
 // the caller can act on the remedy directly. The entries follow the order
 // Devices returns, which is by ascending card then device number, not lexical
 // order. The library never picks one: opening a coin-flip device is the very
-// failure a stable id exists to prevent. Resolve the ambiguity by pinning the
-// physical port with DeviceInfo.PortID instead.
+// failure a stable id exists to prevent. Resolve the ambiguity by passing one
+// of the listed ids as Config.Device: a PortID pins the unit in that physical
+// port and stays correct across reboots, while a fallback hw address identifies
+// the unit only for the current boot and should not be persisted.
 type AmbiguousDeviceError struct {
 	ID      string
 	Matches []string
@@ -81,7 +83,7 @@ type AmbiguousDeviceError struct {
 
 func (e *AmbiguousDeviceError) Error() string {
 	if len(e.Matches) == 0 {
-		return fmt.Sprintf("capture: device id %q matches multiple devices; pin one by its PortID", e.ID)
+		return fmt.Sprintf("capture: device id %q matches multiple devices; pin one of them", e.ID)
 	}
 	// Each match is quoted because every id form carries a comma before the
 	// device number, so a bare comma-joined list cannot be split back apart by
@@ -90,7 +92,9 @@ func (e *AmbiguousDeviceError) Error() string {
 	for _, m := range e.Matches {
 		quoted = append(quoted, strconv.Quote(m))
 	}
-	return fmt.Sprintf("capture: device id %q matches %d devices (%s); pin one by its PortID", e.ID, len(e.Matches), strings.Join(quoted, ", "))
+	// "a listed id" rather than "its PortID": a match whose port could not be
+	// derived is listed by its hw address instead, which is not a PortID.
+	return fmt.Sprintf("capture: device id %q matches %d devices (%s); pin one by a listed id", e.ID, len(e.Matches), strings.Join(quoted, ", "))
 }
 
 // BadRateError reports that the hardware does not support the exact requested

@@ -4,6 +4,7 @@ package capture
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"slices"
 	"strconv"
@@ -94,7 +95,7 @@ func TestResolveDeviceAmbiguous(t *testing.T) {
 	if len(amb.Matches) != 2 {
 		t.Errorf("Matches = %v, want both cards", amb.Matches)
 	}
-	// The message tells the user to pin one by its PortID, so it must name the
+	// The message tells the user to pin one of the listed ids, so it must name the
 	// two PortIDs (not the hw addresses): the twin on devpath 3 and on devpath 4.
 	port3 := twinPort3ID
 	port4 := twinPort4ID
@@ -585,10 +586,20 @@ func TestAmbiguousDeviceErrorQuotesMatches(t *testing.T) {
 		ID:      "usb:16d0:06f3:s=DUP:if=0,0",
 		Matches: []string{twinPort3ID, "hw:2,0"},
 	}
-	got := e.Error()
-	for _, want := range []string{strconv.Quote(twinPort3ID), strconv.Quote("hw:2,0")} {
-		if !strings.Contains(got, want) {
-			t.Errorf("Error() = %q, want it to contain the quoted match %s", got, want)
-		}
+	// Assert the whole rendering, not just the quoting: the instruction has to
+	// stay honest about what the listed entries are, since a fallback entry is
+	// an hw address and cannot be pinned "by its PortID".
+	want := fmt.Sprintf("capture: device id %q matches 2 devices (%s, %s); pin one by a listed id",
+		e.ID, strconv.Quote(twinPort3ID), strconv.Quote("hw:2,0"))
+	if got := e.Error(); got != want {
+		t.Errorf("Error() =\n  %q\nwant\n  %q", got, want)
+	}
+
+	// The no-matches branch is unreachable from matchStableID but the type is
+	// exported, so a caller can construct one; it must not render "0 devices ()".
+	empty := &AmbiguousDeviceError{ID: "usb:16d0:06f3:s=DUP:if=0,0"}
+	wantEmpty := fmt.Sprintf("capture: device id %q matches multiple devices; pin one of them", empty.ID)
+	if got := empty.Error(); got != wantEmpty {
+		t.Errorf("Error() with no matches = %q, want %q", got, wantEmpty)
 	}
 }

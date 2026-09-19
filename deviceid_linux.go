@@ -462,7 +462,7 @@ func matchStableID(canon, orig string) (DeviceInfo, error) {
 	case 1:
 		return matches[0], nil
 	default:
-		// The error's remedy is to pin one match by its PortID, so Matches must
+		// The error's remedy is to pin one match by a listed id, so Matches must
 		// carry PortIDs; fall back to a match's current-boot HWAddr when it has no
 		// PortID, so the list never has a hole the caller cannot act on.
 		pins := make([]string, 0, len(matches))

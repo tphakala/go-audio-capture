@@ -99,7 +99,7 @@ var amb *capture.AmbiguousDeviceError
 d, err := capture.Resolve(persistedID)
 switch {
 case errors.As(err, &amb): // *AmbiguousDeviceError
-    // Two units report the same serial. Pin one with its PortID; the library
+    // Two units report the same serial. Pin one with a listed id; the library
     // will not guess, because opening a coin-flip device is the failure a
     // stable id exists to prevent.
 case errors.Is(err, capture.ErrDeviceGone):
