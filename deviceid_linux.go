@@ -63,7 +63,7 @@ func readCardIdent(sys string, card int) cardIdent {
 		return cardIdent{HasSysfs: true, CardID: id}
 	}
 
-	usb, ok := readUSBIdent(devDir)
+	usb, ok := readUSBIdent(sys, devDir)
 	if !ok {
 		// Behind USB but its identity could not be read (a real read error, or an
 		// unparseable interface number). Falling back to the kernel card id here
@@ -87,7 +87,7 @@ func readCardIdent(sys string, card int) cardIdent {
 // vid:pid, and the caller may key it on the kernel card id). false means the
 // card IS behind USB but a real read error left its identity unknowable, so the
 // caller must refuse to identify it rather than fall back to a different id form.
-func readUSBIdent(devDir string) (*USBInfo, bool) {
+func readUSBIdent(root, devDir string) (*USBInfo, bool) {
 	if sysSubsystem(devDir) != "usb" {
 		return nil, true
 	}
@@ -140,7 +140,7 @@ func readUSBIdent(devDir string) (*USBInfo, bool) {
 		VendorID:  strings.ToLower(vid),
 		ProductID: strings.ToLower(pid),
 		Serial:    serial,
-		Port:      usbPort(usbDev),
+		Port:      usbPort(root, usbDev),
 		Interface: ifNum,
 	}, true
 }
@@ -151,7 +151,7 @@ func readUSBIdent(devDir string) (*USBInfo, bool) {
 // lands on the PCI or platform node of the host controller. The USB bus number
 // is deliberately not used: bus numbers follow controller probe order and so
 // carry the very instability this id exists to avoid.
-func usbPort(usbDev string) string {
+func usbPort(root, usbDev string) string {
 	// A real read error on devpath is deliberately treated like its absence:
 	// both yield an empty port, which routes a serial-less card to the unstable
 	// hw:N,D fallback (IDStable=false) rather than to a confident but wrong id. A
@@ -161,7 +161,11 @@ func usbPort(usbDev string) string {
 	devpath, _ := readSysAttr(usbDev, "devpath")
 	controller := ""
 	for dir := filepath.Dir(usbDev); ; dir = filepath.Dir(dir) {
-		if dir == "/" || dir == "." || dir == filepath.Dir(dir) {
+		// Bound the walk by the sysfs root it was handed, not the filesystem
+		// root, so a fixture tree (or a container mount) can never make it climb
+		// out of the tree being read. Under a real /sys the host controller is
+		// found long before this, so the extra guard costs nothing there.
+		if dir == root || dir == "/" || dir == "." || dir == filepath.Dir(dir) {
 			break
 		}
 		if sysSubsystem(dir) != "usb" {
@@ -223,6 +227,11 @@ func stableID(ci cardIdent, card, device int) (id string, stable bool) {
 	if ci.CardID != "" {
 		return cardFormID(ci.CardID, device), true
 	}
+	// HasSysfs with neither a USB identity nor a kernel card id. readCardIdent
+	// never returns that combination: a sysfs-backed non-USB card always carries
+	// its card id, and it fails closed (HasSysfs=false) otherwise. This fallback
+	// exists only to keep the function total; TestStableIDFallsBackToHWAddr
+	// exercises it directly so the guard cannot rot unnoticed.
 	return hwAddr(card, device), false
 }
 
@@ -335,13 +344,13 @@ func unescapeIDField(s string) (string, error) {
 		if i+2 >= len(s) {
 			return "", errTruncatedEscape
 		}
-		hi, err := hexVal(s[i+1])
-		if err != nil {
-			return "", err
+		hi, ok := hexVal(s[i+1])
+		if !ok {
+			return "", fmt.Errorf("invalid percent-escape %q", s[i:i+3])
 		}
-		lo, err := hexVal(s[i+2])
-		if err != nil {
-			return "", err
+		lo, ok := hexVal(s[i+2])
+		if !ok {
+			return "", fmt.Errorf("invalid percent-escape %q", s[i:i+3])
 		}
 		b.WriteByte(hi<<4 | lo)
 		i += 2
@@ -349,16 +358,16 @@ func unescapeIDField(s string) (string, error) {
 	return b.String(), nil
 }
 
-func hexVal(c byte) (byte, error) {
+func hexVal(c byte) (byte, bool) {
 	switch {
 	case c >= '0' && c <= '9':
-		return c - '0', nil
+		return c - '0', true
 	case c >= 'a' && c <= 'f':
-		return c - 'a' + 10, nil
+		return c - 'a' + 10, true
 	case c >= 'A' && c <= 'F':
-		return c - 'A' + 10, nil
+		return c - 'A' + 10, true
 	default:
-		return 0, fmt.Errorf("bad hex digit %q", string(rune(c)))
+		return 0, false
 	}
 }
 
@@ -372,14 +381,14 @@ type resolved struct {
 	verifyID string
 }
 
-// resolveDevice turns any accepted device id into a card and device number.
+// resolveForOpen turns any accepted device id into a card and device number.
 //
 // A numeric "hw:N,D" (or "N,D", or "hw:N") passes straight through without
 // enumerating, so it keeps opening exactly what it names even on a system where
 // /proc/asound cannot be read. A stable id is matched against the devices
 // present right now, on every call: caching the result would reintroduce the
 // very staleness the stable id exists to remove.
-func resolveDevice(id string) (resolved, error) {
+func resolveForOpen(id string) (resolved, error) {
 	trimmed := strings.TrimSpace(id)
 	if !isStableIDForm(trimmed) {
 		card, dev, err := parseNumericDeviceID(id)
@@ -508,42 +517,45 @@ func canonicalStableID(id string) (string, error) {
 // is delimited by the LAST ":if=" rather than by splitting on every ':', so a
 // port value may carry the raw colons of a PCI address.
 func canonicalUSBID(id string) (string, error) {
-	bad := func() (string, error) { return "", &BadDeviceError{Value: id} }
+	bad := func(err error) (string, error) { return "", &BadDeviceError{Value: id, Err: err} }
 
 	rest := strings.TrimPrefix(id, "usb:")
 	vid, rest, ok := strings.Cut(rest, ":")
 	if !ok {
-		return bad()
+		return bad(errors.New("missing ':' after vendor id"))
 	}
 	pid, rest, ok := strings.Cut(rest, ":")
 	if !ok {
-		return bad()
+		return bad(errors.New("missing ':' after product id"))
 	}
 	if !isHex4(vid) || !isHex4(pid) {
-		return bad()
+		return bad(fmt.Errorf("vendor and product id must each be four hex digits, got %q and %q", vid, pid))
 	}
 	i := strings.LastIndex(rest, ":if=")
 	if i < 0 {
-		return bad()
+		return bad(errors.New(`missing ":if=" interface marker`))
 	}
 	kv, tail := rest[:i], rest[i+len(":if="):]
 	kind, raw, ok := strings.Cut(kv, "=")
 	if !ok || (kind != "s" && kind != "p") {
-		return bad()
+		return bad(fmt.Errorf(`selector must be "s=" (serial) or "p=" (port), got %q`, kv))
 	}
 	value, err := unescapeIDField(raw)
-	if err != nil || value == "" {
-		return bad()
+	if err != nil {
+		return bad(err)
+	}
+	if value == "" {
+		return bad(errors.New("empty selector value"))
 	}
 	ifStr, devStr, hasComma := strings.Cut(tail, ",")
 	ifNum, err := atoiNonNeg(ifStr)
 	if err != nil {
-		return bad()
+		return bad(fmt.Errorf("interface number: %w", err))
 	}
 	device := 0
 	if hasComma {
 		if device, err = atoiNonNeg(devStr); err != nil {
-			return bad()
+			return bad(fmt.Errorf("device number: %w", err))
 		}
 	}
 	// Re-render through the same builders Devices uses, so the canonical spelling
@@ -563,23 +575,23 @@ func canonicalUSBID(id string) (string, error) {
 // canonicalCardID parses the alsa-lib "hw:CARD=<name>[,DEV=<n>]" form, with DEV
 // defaulting to 0 exactly as alsa-lib does.
 func canonicalCardID(id string) (string, error) {
-	bad := func() (string, error) { return "", &BadDeviceError{Value: id} }
+	bad := func(err error) (string, error) { return "", &BadDeviceError{Value: id, Err: err} }
 
 	rest := strings.TrimPrefix(id, "hw:")
 	cardPart, devPart, hasComma := strings.Cut(rest, ",")
 	key, name, ok := strings.Cut(cardPart, "=")
 	if !ok || !strings.EqualFold(key, "CARD") || name == "" {
-		return bad()
+		return bad(errors.New(`expected "CARD=<name>"`))
 	}
 	device := 0
 	if hasComma {
 		dkey, dval, ok := strings.Cut(devPart, "=")
 		if !ok || !strings.EqualFold(dkey, "DEV") {
-			return bad()
+			return bad(errors.New(`expected "DEV=<n>"`))
 		}
 		var err error
 		if device, err = atoiNonNeg(dval); err != nil {
-			return bad()
+			return bad(fmt.Errorf("device number: %w", err))
 		}
 	}
 	return cardFormID(name, device), nil
@@ -593,11 +605,11 @@ func parseNumericDeviceID(s string) (card, device int, err error) {
 	s = strings.TrimPrefix(s, "hw:")
 	cardStr, devStr, hasComma := strings.Cut(s, ",")
 	if card, err = atoiNonNeg(strings.TrimSpace(cardStr)); err != nil {
-		return 0, 0, &BadDeviceError{Value: orig}
+		return 0, 0, &BadDeviceError{Value: orig, Err: fmt.Errorf("card number: %w", err)}
 	}
 	if hasComma {
 		if device, err = atoiNonNeg(strings.TrimSpace(devStr)); err != nil {
-			return 0, 0, &BadDeviceError{Value: orig}
+			return 0, 0, &BadDeviceError{Value: orig, Err: fmt.Errorf("device number: %w", err)}
 		}
 	}
 	return card, device, nil
@@ -619,7 +631,7 @@ func isHex4(s string) bool {
 		return false
 	}
 	for i := range len(s) {
-		if _, err := hexVal(s[i]); err != nil {
+		if _, ok := hexVal(s[i]); !ok {
 			return false
 		}
 	}

@@ -30,15 +30,15 @@ func TestResolveDeviceStableForms(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, err := resolveDevice(tt.id)
+			r, err := resolveForOpen(tt.id)
 			if err != nil {
-				t.Fatalf("resolveDevice(%q): %v", tt.id, err)
+				t.Fatalf("resolveForOpen(%q): %v", tt.id, err)
 			}
 			if r.card != tt.card || r.device != tt.dev {
-				t.Errorf("resolveDevice(%q) = card %d dev %d, want card %d dev %d", tt.id, r.card, r.device, tt.card, tt.dev)
+				t.Errorf("resolveForOpen(%q) = card %d dev %d, want card %d dev %d", tt.id, r.card, r.device, tt.card, tt.dev)
 			}
 			if r.verifyID == "" {
-				t.Errorf("resolveDevice(%q) verifyID is empty; a stable id must be re-checked after open", tt.id)
+				t.Errorf("resolveForOpen(%q) verifyID is empty; a stable id must be re-checked after open", tt.id)
 			}
 		})
 	}
@@ -53,16 +53,16 @@ func TestResolveDeviceNotFound(t *testing.T) {
 		"hw:CARD=Nonexistent,DEV=0",
 		"usb:16d0:06f3:s=0384_2474750763FA81C9:if=0,7", // present card, absent pcm
 	} {
-		_, err := resolveDevice(id)
+		_, err := resolveForOpen(id)
 		var nf *DeviceNotFoundError
 		if !errors.As(err, &nf) {
-			t.Errorf("resolveDevice(%q) err = %v, want *DeviceNotFoundError", id, err)
+			t.Errorf("resolveForOpen(%q) err = %v, want *DeviceNotFoundError", id, err)
 			continue
 		}
 		// Existing consumers retire a device on ErrDeviceGone; that must keep
 		// working for an id that no longer matches anything.
 		if !errors.Is(err, ErrDeviceGone) {
-			t.Errorf("resolveDevice(%q): errors.Is(err, ErrDeviceGone) = false, want true", id)
+			t.Errorf("resolveForOpen(%q): errors.Is(err, ErrDeviceGone) = false, want true", id)
 		}
 		if nf.ID != id {
 			t.Errorf("DeviceNotFoundError.ID = %q, want %q", nf.ID, id)
@@ -87,10 +87,10 @@ func TestResolveDeviceAmbiguous(t *testing.T) {
 	useFixture(t, []fakeCard{twin(1, "3"), twin(2, "4")})
 
 	id := "usb:16d0:06f3:s=DUPLICATE:if=0,0"
-	_, err := resolveDevice(id)
+	_, err := resolveForOpen(id)
 	var amb *AmbiguousDeviceError
 	if !errors.As(err, &amb) {
-		t.Fatalf("resolveDevice(%q) err = %v, want *AmbiguousDeviceError", id, err)
+		t.Fatalf("resolveForOpen(%q) err = %v, want *AmbiguousDeviceError", id, err)
 	}
 	if len(amb.Matches) != 2 {
 		t.Errorf("Matches = %v, want both cards", amb.Matches)
@@ -112,13 +112,13 @@ func TestResolveDeviceAmbiguous(t *testing.T) {
 		{twinPort3ID, 1},
 		{twinPort4ID, 2},
 	} {
-		r, err := resolveDevice(tc.portID)
+		r, err := resolveForOpen(tc.portID)
 		if err != nil {
-			t.Errorf("resolveDevice(%q): %v", tc.portID, err)
+			t.Errorf("resolveForOpen(%q): %v", tc.portID, err)
 			continue
 		}
 		if r.card != tc.card {
-			t.Errorf("resolveDevice(%q) = card %d, want %d", tc.portID, r.card, tc.card)
+			t.Errorf("resolveForOpen(%q) = card %d, want %d", tc.portID, r.card, tc.card)
 		}
 	}
 }
@@ -137,18 +137,24 @@ func TestResolveDeviceMalformed(t *testing.T) {
 		"usb:16d0:06f3:s=:if=0,0",    // empty selector value
 		"usb:16d0:06f3:s=SN:if=x,0",  // interface not a number
 		"usb:16d0:06f3:s=SN:if=0,-1", // negative device
-		"usb:16d0:06f3:s=%ZZ:if=0,0", // bad escape
+		"usb:16d0:06f3:s=%ZZ:if=0,0", // bad escape (bad high nibble)
+		"usb:16d0:06f3:s=%1Z:if=0,0", // bad escape (bad low nibble)
 		"usb:16d0:06f3:s=SN%:if=0,0", // truncated escape
 		"hw:CARD=",                   // empty card id
 		"hw:CARD=Loopback,DEVICE=0",  // wrong key
 		"hw:CARD=Loopback,DEV=x",     // device not a number
 		"hw:NOTAKEY=Loopback",        // wrong key
 	} {
-		_, err := resolveDevice(id)
+		_, err := resolveForOpen(id)
 		var bde *BadDeviceError
 		if !errors.As(err, &bde) {
-			t.Errorf("resolveDevice(%q) err = %v, want *BadDeviceError", id, err)
+			t.Errorf("resolveForOpen(%q) err = %v, want *BadDeviceError", id, err)
 			continue
+		}
+		// Every rejection threads a specific reason; a site that dropped it
+		// (regressing to a bare BadDeviceError{Value: id}) would leave Err nil.
+		if bde.Err == nil {
+			t.Errorf("resolveForOpen(%q): BadDeviceError.Err is nil, want a threaded reason", id)
 		}
 		// The rendered message must name the offending id, or a stubbed
 		// Error() would go undetected. The ids here are long and distinctive,
@@ -156,6 +162,45 @@ func TestResolveDeviceMalformed(t *testing.T) {
 		if !strings.Contains(bde.Error(), id) {
 			t.Errorf("BadDeviceError.Error() = %q, does not name the id %q", bde.Error(), id)
 		}
+	}
+}
+
+// TestBadDeviceErrorCarriesReason pins the fix for the collapsed-diagnostics
+// issue: every rejected id must name why it was rejected, the reason must reach
+// errors.Is / errors.As through Unwrap, and two different failures must not
+// render the same message.
+func TestBadDeviceErrorCarriesReason(t *testing.T) {
+	// A malformed stable or numeric id is rejected by the parser before any
+	// enumeration, so no fixture is needed.
+	reason := func(id string) string {
+		t.Helper()
+		_, err := resolveForOpen(id)
+		var bde *BadDeviceError
+		if !errors.As(err, &bde) {
+			t.Fatalf("resolveForOpen(%q) err = %v, want *BadDeviceError", id, err)
+		}
+		if bde.Err == nil {
+			t.Fatalf("resolveForOpen(%q): BadDeviceError.Err is nil, want a reason", id)
+		}
+		if !strings.Contains(bde.Error(), bde.Err.Error()) {
+			t.Errorf("Error() = %q does not include the reason %q", bde.Error(), bde.Err.Error())
+		}
+		return bde.Err.Error()
+	}
+
+	const truncated = "usb:16d0:06f3:s=SN%:if=0,0"
+	const empty = "usb:16d0:06f3:s=:if=0,0"
+
+	// The reason threads all the way through: a truncated escape unwraps to the
+	// sentinel the old code built and then dropped.
+	if _, err := resolveForOpen(truncated); !errors.Is(err, errTruncatedEscape) {
+		t.Errorf("resolveForOpen(%q): errors.Is(err, errTruncatedEscape) = false, want true", truncated)
+	}
+
+	// Distinct failures must render distinct reasons; collapsing them to one
+	// message is exactly the bug being fixed.
+	if reason(truncated) == reason(empty) {
+		t.Errorf("truncated-escape and empty-selector produced the same reason %q", reason(truncated))
 	}
 }
 
@@ -265,9 +310,9 @@ func TestResolveSerialWithDelimiters(t *testing.T) {
 	if want := "usb:16d0:06f3:s=A%2CB%3AC%25D%20E:if=0,0"; id != want {
 		t.Fatalf("ID = %q, want %q", id, want)
 	}
-	r, err := resolveDevice(id)
+	r, err := resolveForOpen(id)
 	if err != nil {
-		t.Fatalf("resolveDevice(%q): %v", id, err)
+		t.Fatalf("resolveForOpen(%q): %v", id, err)
 	}
 	if r.card != 1 || r.device != 0 {
 		t.Errorf("resolved to card %d dev %d, want 1/0", r.card, r.device)
@@ -363,7 +408,11 @@ func TestOpenAcceptsUnchangedCard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	if gotCard != 2 || gotDevice != 0 {
 		t.Errorf("opened card %d device %d, want 2/0", gotCard, gotDevice)
 	}
@@ -393,7 +442,11 @@ func TestOpenPortIDPinsOneOfTwoTwins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(%q): %v", id, err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	if gotCard != 2 {
 		t.Errorf("opened card %d, want 2 (the unit on port 4)", gotCard)
 	}
@@ -535,10 +588,10 @@ func TestResolveAmbiguousFallsBackToHWAddr(t *testing.T) {
 	useFixture(t, []fakeCard{withPort, noPort})
 
 	id := "usb:16d0:06f3:s=DUPLICATE:if=0,0"
-	_, err := resolveDevice(id)
+	_, err := resolveForOpen(id)
 	var amb *AmbiguousDeviceError
 	if !errors.As(err, &amb) {
-		t.Fatalf("resolveDevice(%q) err = %v, want *AmbiguousDeviceError", id, err)
+		t.Fatalf("resolveForOpen(%q) err = %v, want *AmbiguousDeviceError", id, err)
 	}
 	if len(amb.Matches) != 2 {
 		t.Fatalf("Matches = %v, want both cards", amb.Matches)

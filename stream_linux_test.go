@@ -51,19 +51,21 @@ func TestResolveDeviceNumeric(t *testing.T) {
 		{"-1,0", 0, 0, true},
 	}
 	for _, tt := range tests {
-		r, err := resolveDevice(tt.in)
+		r, err := resolveForOpen(tt.in)
 		if tt.wantErr {
 			var bde *BadDeviceError
 			if !errors.As(err, &bde) {
-				t.Errorf("resolveDevice(%q) err = %v, want *BadDeviceError", tt.in, err)
+				t.Errorf("resolveForOpen(%q) err = %v, want *BadDeviceError", tt.in, err)
+			} else if bde.Err == nil {
+				t.Errorf("resolveForOpen(%q): BadDeviceError.Err is nil, want a threaded reason", tt.in)
 			}
 			continue
 		}
 		if err != nil || r.card != tt.card || r.device != tt.dev {
-			t.Errorf("resolveDevice(%q) = (%d,%d,%v), want (%d,%d,nil)", tt.in, r.card, r.device, err, tt.card, tt.dev)
+			t.Errorf("resolveForOpen(%q) = (%d,%d,%v), want (%d,%d,nil)", tt.in, r.card, r.device, err, tt.card, tt.dev)
 		}
 		if r.verifyID != "" {
-			t.Errorf("resolveDevice(%q) verifyID = %q, want empty for a numeric id", tt.in, r.verifyID)
+			t.Errorf("resolveForOpen(%q) verifyID = %q, want empty for a numeric id", tt.in, r.verifyID)
 		}
 	}
 
@@ -74,7 +76,9 @@ func TestResolveDeviceNumeric(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(%q) with unreadable /proc and /sys: %v", hwAddrCard1, err)
 	}
-	_ = s.Close()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 }
 
 // fakePCM implements the pcm seam so Open/Read/Close are testable with no
@@ -149,7 +153,11 @@ func TestOpenReportsNegotiated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	got := s.Negotiated()
 	// Defaults: PeriodFrames = Rate/50 (20 ms) = 960; Periods = 4.
 	if got.Rate != 48000 || got.Channels != 2 || got.PeriodFrames != 960 || got.Periods != 4 {
@@ -194,7 +202,11 @@ func TestOpenFloat32Negotiated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open f32: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	if got := s.Negotiated().Format; got != FormatF32LE {
 		t.Errorf("Negotiated.Format = %v, want f32", got)
 	}
@@ -217,7 +229,11 @@ func TestReadRecoversXrun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	n, err := s.Read(make([]byte, 480*2))
 	if err != nil || n != 480 {
 		t.Fatalf("Read = %d, %v; want 480, nil", n, err)
@@ -231,9 +247,11 @@ func TestReadRecoversXrun(t *testing.T) {
 }
 
 func TestCloseUnblocksRead(t *testing.T) {
+	parked := make(chan struct{})
 	f := &fakePCM{block: make(chan struct{})}
 	f.readFn = func() (int, error) {
-		<-f.block // park until Close unblocks us
+		close(parked) // Read has entered ReadI and is about to park
+		<-f.block     // park until Close unblocks us
 		return 0, unix.EBADF
 	}
 	defer swapOpenPCM(f)()
@@ -243,7 +261,7 @@ func TestCloseUnblocksRead(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { _, e := s.Read(make([]byte, 96)); done <- e }()
-	time.Sleep(20 * time.Millisecond) // let Read park in ReadI
+	<-parked // Read is parked in ReadI, so the Close below races nothing
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -257,13 +275,76 @@ func TestCloseUnblocksRead(t *testing.T) {
 	}
 }
 
+// TestCheapChecksPrecedeResolution pins the ordering change in Open,
+// SupportedRates and SupportedRatesVerified: cheap, device-independent inputs
+// (rate/channels/format) must be validated before the device id is resolved, so
+// an obviously invalid call never pays for a /proc + /sys enumeration. A STABLE
+// id is used on purpose: with the roots pointing at nothing, reaching resolution
+// would enumerate and fail with ErrDeviceGone, so getting a config/format error
+// instead proves the cheap check ran first AND the enumeration was skipped. (A
+// numeric id would short-circuit in parseNumericDeviceID without enumerating and
+// so could not prove the skip.)
+func TestCheapChecksPrecedeResolution(t *testing.T) {
+	// setRoots mutates package vars, so no t.Parallel.
+	tmp := t.TempDir()
+	setRoots(t, filepath.Join(tmp, "no-proc"), filepath.Join(tmp, "no-sys"))
+
+	const stableID = "usb:16d0:06f3:s=X:if=0,0" // well-formed; would enumerate on resolve
+
+	wantConfigField := func(t *testing.T, err error, field string) {
+		t.Helper()
+		if errors.Is(err, ErrDeviceGone) {
+			t.Fatalf("err = %v, want a config error before resolution; a resolution error means the enumeration was not skipped", err)
+		}
+		var ce *ConfigError
+		if !errors.As(err, &ce) {
+			t.Fatalf("err = %v, want *ConfigError", err)
+		}
+		if ce.Field != field {
+			t.Errorf("ConfigError.Field = %q, want %q", ce.Field, field)
+		}
+	}
+
+	t.Run("Open rejects rate before resolving", func(t *testing.T) {
+		_, err := Open(Config{Device: stableID, Rate: 0, Channels: 1, Format: FormatS16LE})
+		wantConfigField(t, err, "rate")
+	})
+	t.Run("Open rejects channels before resolving", func(t *testing.T) {
+		_, err := Open(Config{Device: stableID, Rate: 48000, Channels: 0, Format: FormatS16LE})
+		wantConfigField(t, err, "channels")
+	})
+	t.Run("Open rejects format before resolving", func(t *testing.T) {
+		_, err := Open(Config{Device: stableID, Rate: 48000, Channels: 1, Format: Format(99)})
+		if err == nil {
+			t.Fatal("Open with an invalid format returned nil error")
+		}
+		if errors.Is(err, ErrDeviceGone) {
+			t.Fatalf("Open err = %v, want a format error before resolution (enumeration not skipped)", err)
+		}
+		var bde *BadDeviceError
+		if errors.As(err, &bde) {
+			t.Fatalf("Open err = %v, want a format error, not a device-id error (resolution should be skipped)", err)
+		}
+	})
+	t.Run("SupportedRates rejects channels before resolving", func(t *testing.T) {
+		_, err := SupportedRates(stableID, 0, FormatS16LE)
+		wantConfigField(t, err, "channels")
+	})
+	t.Run("SupportedRatesVerified rejects channels before resolving", func(t *testing.T) {
+		_, err := SupportedRatesVerified(stableID, 0, FormatS16LE)
+		wantConfigField(t, err, "channels")
+	})
+}
+
 func TestReadAfterCloseReturnsErrClosed(t *testing.T) {
 	defer swapOpenPCM(&fakePCM{readFn: func() (int, error) { return 0, nil }})()
 	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS16LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	_ = s.Close()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 	if _, err := s.Read(make([]byte, 96)); !errors.Is(err, ErrClosed) {
 		t.Errorf("Read after Close = %v, want ErrClosed", err)
 	}
@@ -282,7 +363,11 @@ func TestReadMapsRecoverEBADFToErrClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	if _, err := s.Read(make([]byte, 96)); !errors.Is(err, ErrClosed) {
 		t.Errorf("Read with Recover EBADF = %v, want ErrClosed", err)
 	}
@@ -309,7 +394,11 @@ func TestReadMapsDeviceGoneToErrDeviceGone(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open: %v", err)
 			}
-			defer func() { _ = s.Close() }()
+			defer func() {
+				if err := s.Close(); err != nil {
+					t.Errorf("Close: %v", err)
+				}
+			}()
 			if _, err := s.Read(make([]byte, 96)); !errors.Is(err, ErrDeviceGone) {
 				t.Errorf("Read with %v = %v, want ErrDeviceGone", errno, err)
 			}
@@ -329,7 +418,11 @@ func TestReadPassesThroughNonDeviceGoneError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	_, err = s.Read(make([]byte, 96))
 	if errors.Is(err, ErrDeviceGone) {
 		t.Errorf("Read with EIO = %v, want it passed through, not ErrDeviceGone", err)
@@ -454,7 +547,11 @@ func TestStartSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	if err := s.Start(); err != nil {
 		t.Errorf("Start = %v, want nil", err)
 	}
@@ -468,7 +565,9 @@ func TestStartAfterCloseReturnsErrClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	_ = s.Close()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 	if err := s.Start(); !errors.Is(err, ErrClosed) {
 		t.Errorf("Start after Close = %v, want ErrClosed (even with a device-gone startErr)", err)
 	}
@@ -486,7 +585,11 @@ func TestStartMapsDeviceGone(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open: %v", err)
 			}
-			defer func() { _ = s.Close() }()
+			defer func() {
+				if err := s.Close(); err != nil {
+					t.Errorf("Close: %v", err)
+				}
+			}()
 			if err := s.Start(); !errors.Is(err, ErrDeviceGone) {
 				t.Errorf("Start with %v = %v, want ErrDeviceGone", errno, err)
 			}
@@ -503,7 +606,11 @@ func TestStartMapsEBADFToErrClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	if err := s.Start(); !errors.Is(err, ErrClosed) {
 		t.Errorf("Start with EBADF = %v, want ErrClosed", err)
 	}
@@ -518,7 +625,11 @@ func TestStartPassesThroughOtherError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 	err = s.Start()
 	if errors.Is(err, ErrDeviceGone) || errors.Is(err, ErrClosed) {
 		t.Errorf("Start with EIO = %v, want it passed through", err)

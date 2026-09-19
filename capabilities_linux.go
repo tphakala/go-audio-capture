@@ -53,34 +53,39 @@ var standardRates = []int{
 // ErrDeviceGone cases the caller should fall back to a static rate list rather
 // than treating the query as authoritative.
 func SupportedRates(device string, channels int, format Format) (RateSupport, error) {
-	r, af, err := resolveQuery(device, channels, format)
+	r, err := prepareQuery(device, channels, format)
 	if err != nil {
 		return RateSupport{}, err
 	}
-	return supportedRatesAt(r, channels, format, af)
+	return supportedRatesAt(r, channels, format)
 }
 
-// resolveQuery resolves the device id and validates the channel count and
-// format once, so that a query which runs two passes over the same device
-// resolves it exactly once. Resolving per pass would let a device swapped in
-// between the passes be refined as one unit and verified as another.
-func resolveQuery(device string, channels int, format Format) (resolved, uint32, error) {
-	r, err := resolveDevice(device)
-	if err != nil {
-		return resolved{}, 0, err
-	}
+// prepareQuery validates the query's cheap, device-independent inputs (channel
+// count and sample format) and only then resolves the device id, so an obviously
+// invalid call is rejected before paying for a /proc + /sys enumeration. Open
+// orders its own checks the same way, so the two entry points agree on which
+// error a caller sees when more than one input is bad. Resolution happens exactly
+// once here and is shared across a query's passes: resolving per pass would let a
+// device swapped in between them be refined as one unit and verified as another.
+func prepareQuery(device string, channels int, format Format) (resolved, error) {
 	if channels < 1 {
-		return resolved{}, 0, &ConfigError{Field: "channels", Reason: "must be at least 1"}
+		return resolved{}, &ConfigError{Field: "channels", Reason: "must be at least 1"}
 	}
-	af, err := alsaFormat(format)
-	if err != nil {
-		return resolved{}, 0, err
+	if _, err := alsaFormat(format); err != nil {
+		return resolved{}, err
 	}
-	return r, af, nil
+	return resolveForOpen(device)
 }
 
 // supportedRatesAt runs the HW_REFINE pass against an already-resolved device.
-func supportedRatesAt(r resolved, channels int, format Format, af uint32) (RateSupport, error) {
+// It derives the ALSA format from format itself rather than taking a separate af
+// argument, so the value fed to the ioctl and the one named in a BadFormatError
+// cannot disagree.
+func supportedRatesAt(r resolved, channels int, format Format) (RateSupport, error) {
+	af, err := alsaFormat(format)
+	if err != nil {
+		return RateSupport{}, err
+	}
 	p, err := openRatePCM(r.card, r.device)
 	if err != nil {
 		return RateSupport{}, translateQueryError(err)
@@ -129,16 +134,23 @@ func supportedRatesAt(r resolved, channels int, format Format, af uint32) (RateS
 // missing device yields ErrDeviceInUse / ErrDeviceGone and the caller should
 // fall back to a static list.
 func SupportedRatesVerified(device string, channels int, format Format) (RateSupport, error) {
-	r, af, err := resolveQuery(device, channels, format)
+	r, err := prepareQuery(device, channels, format)
 	if err != nil {
 		return RateSupport{}, err
 	}
-	rs, err := supportedRatesAt(r, channels, format, af)
+	rs, err := supportedRatesAt(r, channels, format)
 	if err != nil {
 		return RateSupport{}, err
 	}
 	if len(rs.Rates) == 0 {
 		return rs, nil // nothing advertised: nothing to verify
+	}
+
+	// format was validated in prepareQuery, so this cannot fail here; deriving af
+	// from format (rather than threading it) keeps the two in lockstep.
+	af, err := alsaFormat(format)
+	if err != nil {
+		return RateSupport{}, err
 	}
 
 	verified := make([]int, 0, len(rs.Rates))

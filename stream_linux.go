@@ -51,10 +51,10 @@ type Stream struct {
 // when another application holds the device, and ErrDeviceGone when the device is
 // missing or was removed.
 func Open(cfg Config) (*Stream, error) {
-	r, err := resolveDevice(cfg.Device)
-	if err != nil {
-		return nil, err
-	}
+	// Cheap, device-independent checks first, so an obviously invalid config is
+	// rejected before a /proc + /sys enumeration resolves the id. SupportedRates
+	// (prepareQuery) orders its checks the same way, so both entry points agree on
+	// which error a caller sees when more than one field is bad.
 	if cfg.Rate <= 0 {
 		return nil, &ConfigError{Field: "rate", Reason: "must be positive"}
 	}
@@ -62,6 +62,10 @@ func Open(cfg Config) (*Stream, error) {
 		return nil, &ConfigError{Field: "channels", Reason: "must be at least 1"}
 	}
 	format, err := alsaFormat(cfg.Format)
+	if err != nil {
+		return nil, err
+	}
+	r, err := resolveForOpen(cfg.Device)
 	if err != nil {
 		return nil, err
 	}

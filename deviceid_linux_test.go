@@ -501,6 +501,41 @@ func TestDevicesFallbackWithoutSysfs(t *testing.T) {
 	}
 }
 
+// TestStableIDFallsBackToHWAddr exercises stableID's defensive final branch:
+// HasSysfs true with neither a USB identity nor a kernel card id. readCardIdent
+// never produces that combination, so the branch is unreachable in practice, but
+// it is kept to keep the function total and is pinned here so it cannot rot away.
+func TestStableIDFallsBackToHWAddr(t *testing.T) {
+	id, stable := stableID(cardIdent{HasSysfs: true}, 3, 2)
+	if want := hwAddr(3, 2); id != want {
+		t.Errorf("stableID = %q, want the hw address %q", id, want)
+	}
+	if stable {
+		t.Error("stableID reported IDStable=true for a card with no stable identity")
+	}
+}
+
+// TestUSBPortStopsAtSysfsRoot pins the walk bound added to usbPort: when the
+// usb_device sits directly under the sysfs root, with no non-USB controller node
+// between it and the root, the walk must stop at the root and yield no port,
+// rather than climbing out of the tree and naming the root's own basename as a
+// controller. On revert (dropping the `dir == root` guard) sysSubsystem(root) is
+// not "usb", so the walk would treat root as the controller and return a
+// spurious "<rootbase>-<devpath>".
+func TestUSBPortStopsAtSysfsRoot(t *testing.T) {
+	root := t.TempDir()
+	usbDev := filepath.Join(root, "usbdev")
+	if err := os.MkdirAll(usbDev, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usbDev, "devpath"), []byte("3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := usbPort(root, usbDev); got != "" {
+		t.Errorf("usbPort bounded by root = %q, want empty (the walk must stop at root, not name it a controller)", got)
+	}
+}
+
 // TestDevicesCardWithoutDeviceLink covers a virtual card whose sysfs node has
 // no bus device: the kernel card id alone still gives a stable name.
 func TestDevicesCardWithoutDeviceLink(t *testing.T) {
