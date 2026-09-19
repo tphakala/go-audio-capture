@@ -39,13 +39,28 @@ var ErrCapabilitiesUnsupported = errors.New("capture: capability query not suppo
 // current-boot "hw:card,device" (or "card,device", or "hw:card"). The id is
 // malformed, as opposed to well-formed but not currently present, which is
 // *DeviceNotFoundError.
+//
+// Err names the specific reason the id was rejected (which separator was
+// missing, which field was not a number, a malformed percent-escape, and so
+// on); BadDeviceError unwraps to it. It matches the other typed errors in this
+// file, each of which carries the detail that produced it (BadRateError has
+// Min/Max, BadFormatError has Rate/Channels/Format, AmbiguousDeviceError has
+// Matches). Err is nil only for a value built without a reason.
 type BadDeviceError struct {
 	Value string
+	Err   error
 }
 
 func (e *BadDeviceError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("capture: invalid device id %q: %v (want hw:card,device, hw:CARD=name,DEV=dev, or usb:vid:pid:...)", e.Value, e.Err)
+	}
 	return fmt.Sprintf("capture: invalid device id %q (want hw:card,device, hw:CARD=name,DEV=dev, or usb:vid:pid:...)", e.Value)
 }
+
+// Unwrap reports the specific parse failure so errors.Is and errors.As can
+// reach it.
+func (e *BadDeviceError) Unwrap() error { return e.Err }
 
 // DeviceNotFoundError reports a well-formed device id that matches no device
 // currently present: the hardware it names is unplugged, powered off, or was

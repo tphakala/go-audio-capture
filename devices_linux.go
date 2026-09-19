@@ -40,10 +40,10 @@ var cardHeaderRe = regexp.MustCompile(`^\s*(\d+)\s+\[[^\]]*\]:\s+\S+\s+-\s+(.+?)
 // numbers, e.g. ".../card1/pcm0c/info".
 var captureNodeRe = regexp.MustCompile(`card(\d+)/pcm(\d+)c/info$`)
 
-func devicesFrom(procRoot, sysPath string) ([]DeviceInfo, error) {
-	cards, err := os.ReadFile(filepath.Join(procRoot, "cards"))
+func devicesFrom(procDir, sysDir string) ([]DeviceInfo, error) {
+	cards, err := os.ReadFile(filepath.Join(procDir, "cards"))
 	if err != nil {
-		return nil, fmt.Errorf("read %s/cards: %w", procRoot, err)
+		return nil, fmt.Errorf("read %s/cards: %w", procDir, err)
 	}
 	names := parseCards(cards)
 
@@ -51,7 +51,7 @@ func devicesFrom(procRoot, sysPath string) ([]DeviceInfo, error) {
 	// or a container mount, can contain '[' or '*') is matched literally rather
 	// than parsed as glob syntax, which would silently match nothing and make
 	// Devices return an empty list. Only the "card*"/"pcm*c" parts are patterns.
-	infoPaths, err := filepath.Glob(filepath.Join(quoteGlobMeta(procRoot), "card*", "pcm*c", "info"))
+	infoPaths, err := filepath.Glob(filepath.Join(quoteGlobMeta(procDir), "card*", "pcm*c", "info"))
 	if err != nil {
 		return nil, fmt.Errorf("glob capture nodes: %w", err)
 	}
@@ -72,7 +72,7 @@ func devicesFrom(procRoot, sysPath string) ([]DeviceInfo, error) {
 		}
 		ci, ok := idents[card]
 		if !ok {
-			ci = readCardIdent(sysPath, card)
+			ci = readCardIdent(sysDir, card)
 			idents[card] = ci
 		}
 		id, stable := stableID(ci, card, device)

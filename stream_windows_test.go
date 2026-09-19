@@ -222,7 +222,11 @@ func TestStartTranslatesErrors(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open: %v", err)
 			}
-			defer func() { _ = s.Close() }()
+			defer func() {
+				if err := s.Close(); err != nil {
+					t.Errorf("Close: %v", err)
+				}
+			}()
 			if err := s.Start(); err == nil || !tt.check(err) {
 				t.Errorf("Start with %v = %v, want translated public error", tt.startErr, err)
 			}

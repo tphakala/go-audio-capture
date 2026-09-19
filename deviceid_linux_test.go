@@ -501,6 +501,66 @@ func TestDevicesFallbackWithoutSysfs(t *testing.T) {
 	}
 }
 
+// TestStableIDFallsBackToHWAddr exercises stableID's defensive final branch:
+// HasSysfs true with neither a USB identity nor a kernel card id. readCardIdent
+// never produces that combination, so the branch is unreachable in practice, but
+// it is kept to keep the function total and is pinned here so it cannot rot away.
+func TestStableIDFallsBackToHWAddr(t *testing.T) {
+	id, stable := stableID(cardIdent{HasSysfs: true}, 3, 2)
+	if want := hwAddr(3, 2); id != want {
+		t.Errorf("stableID = %q, want the hw address %q", id, want)
+	}
+	if stable {
+		t.Error("stableID reported IDStable=true for a card with no stable identity")
+	}
+}
+
+// TestUSBPortStopsAtSysfsRoot pins the walk bound added to usbPort: when the
+// usb_device sits directly under the sysfs root, with no non-USB controller node
+// between it and the root, the walk must stop at the root and yield no port,
+// rather than climbing out of the tree and naming the root's own basename as a
+// controller. On revert (dropping the `dir == root` guard) sysSubsystem(root) is
+// not "usb", so the walk would treat root as the controller and return a
+// spurious "<rootbase>-<devpath>".
+func TestUSBPortStopsAtSysfsRoot(t *testing.T) {
+	root := t.TempDir()
+	usbDev := filepath.Join(root, "usbdev")
+	if err := os.MkdirAll(usbDev, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usbDev, "devpath"), []byte("3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := usbPort(root, usbDev); got != "" {
+		t.Errorf("usbPort bounded by root = %q, want empty (the walk must stop at root, not name it a controller)", got)
+	}
+}
+
+// TestUSBPortStopsAtSymlinkedRoot pins the symlink normalization: readCardIdent
+// hands usbPort an EvalSymlinks-resolved device path but the raw sysfs root, so a
+// symlinked root must still bound the walk. The device path is given in resolved
+// form (as production does) while the root is a symlink to the same tree; without
+// resolving root to match, the walk would step over the boundary and name an
+// ancestor as the controller instead of returning no port.
+func TestUSBPortStopsAtSymlinkedRoot(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "realsys")
+	usbDev := filepath.Join(realRoot, "usbdev")
+	if err := os.MkdirAll(usbDev, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usbDev, "devpath"), []byte("3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkRoot := filepath.Join(base, "linksys")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Fatal(err)
+	}
+	if got := usbPort(linkRoot, usbDev); got != "" {
+		t.Errorf("usbPort with a symlinked root = %q, want empty (root must be resolved to bound the walk)", got)
+	}
+}
+
 // TestDevicesCardWithoutDeviceLink covers a virtual card whose sysfs node has
 // no bus device: the kernel card id alone still gives a stable name.
 func TestDevicesCardWithoutDeviceLink(t *testing.T) {
