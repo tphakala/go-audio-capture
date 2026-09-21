@@ -1,0 +1,7 @@
+# Coverage tracks the library. cmd/gac-rec is a spike/debug recorder whose main()
+# and record() are exercised only against real hardware, not unit tests, so its
+# CLI entry points are excluded from the coverage targets rather than dragging the
+# patch/project numbers down. Its pure helpers still run under `go test`; they are
+# simply not counted toward the coverage gate.
+ignore:
+  - "cmd/**/*"
