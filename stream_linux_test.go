@@ -175,6 +175,8 @@ func TestAlsaFormat(t *testing.T) {
 		wantErr bool
 	}{
 		{FormatS16LE, alsa.FormatS16LE, false},
+		{FormatS24LE, alsa.FormatS24LE, false},
+		{FormatS243LE, alsa.FormatS243LE, false},
 		{FormatS32LE, alsa.FormatS32LE, false},
 		{FormatF32LE, alsa.FormatFloatLE, false},
 		{Format(99), 0, true},
@@ -212,6 +214,40 @@ func TestOpenFloat32Negotiated(t *testing.T) {
 	}
 	if got := s.Negotiated().Format.BytesPerSample(); got != 4 {
 		t.Errorf("f32 BytesPerSample = %d, want 4", got)
+	}
+}
+
+// TestOpenS24Negotiated confirms Open accepts both 24-bit formats end to end: it
+// must not error (which exercises alsaFormat's S24_LE and S24_3LE arms; a missing
+// arm fails Open), and the negotiated config echoes the requested format at its
+// distinct byte width (S24_3LE is 3 bytes packed, S24_LE is 4 bytes 24-in-32).
+func TestOpenS24Negotiated(t *testing.T) {
+	tests := []struct {
+		format    Format
+		wantBytes int
+	}{
+		{FormatS243LE, 3},
+		{FormatS24LE, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.format.String(), func(t *testing.T) {
+			defer swapOpenPCM(&fakePCM{readFn: func() (int, error) { return 0, nil }})()
+			s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: tt.format})
+			if err != nil {
+				t.Fatalf("Open %s: %v", tt.format, err)
+			}
+			defer func() {
+				if err := s.Close(); err != nil {
+					t.Errorf("Close: %v", err)
+				}
+			}()
+			if got := s.Negotiated().Format; got != tt.format {
+				t.Errorf("Negotiated.Format = %v, want %v", got, tt.format)
+			}
+			if got := s.Negotiated().Format.BytesPerSample(); got != tt.wantBytes {
+				t.Errorf("%s BytesPerSample = %d, want %d", tt.format, got, tt.wantBytes)
+			}
+		})
 	}
 }
 

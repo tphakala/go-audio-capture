@@ -10,6 +10,42 @@ import (
 	"testing"
 )
 
+// TestLeftAlignS24LE pins that gac-rec renders ALSA S24_LE (24 valid bits in the
+// low 3 bytes of a 4-byte word, the top byte device-dependent) as left-aligned
+// 32-bit PCM. The zero-padded negative row is load-bearing: without the shift it
+// stays a huge positive value and plays as a screech, so it is exactly the case
+// the fix exists for.
+func TestLeftAlignS24LE(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []byte
+		want []byte
+	}{
+		{"positive one", []byte{0x01, 0x00, 0x00, 0x00}, []byte{0x00, 0x01, 0x00, 0x00}},
+		{"neg one sign-extended", []byte{0xFF, 0xFF, 0xFF, 0xFF}, []byte{0x00, 0xFF, 0xFF, 0xFF}},
+		{"neg one zero-padded", []byte{0xFF, 0xFF, 0xFF, 0x00}, []byte{0x00, 0xFF, 0xFF, 0xFF}},
+		{"max positive zero-padded", []byte{0xFF, 0xFF, 0x7F, 0x00}, []byte{0x00, 0xFF, 0xFF, 0x7F}},
+		{"min negative zero-padded", []byte{0x00, 0x00, 0x80, 0x00}, []byte{0x00, 0x00, 0x00, 0x80}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := append([]byte(nil), tt.in...)
+			leftAlignS24LE(buf)
+			if !bytes.Equal(buf, tt.want) {
+				t.Errorf("leftAlignS24LE(%v) = %v, want %v", tt.in, buf, tt.want)
+			}
+		})
+	}
+	// Two samples in one buffer: confirms every 4-byte word is shifted, not just
+	// the first (a loop that stopped after one word would leave the second raw).
+	buf := []byte{0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00}
+	leftAlignS24LE(buf)
+	want := []byte{0x00, 0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF}
+	if !bytes.Equal(buf, want) {
+		t.Errorf("multi-word: got %v, want %v", buf, want)
+	}
+}
+
 // TestWriteWAVHeaderFormatTag pins the WAV format tag (offset 20, 2 bytes): 1 for
 // integer PCM, 3 (WAVE_FORMAT_IEEE_FLOAT) for float. A reader uses this tag to
 // decide whether the samples are integers or floats, so a wrong tag corrupts f32

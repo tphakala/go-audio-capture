@@ -140,8 +140,15 @@ func waFormat(f Format) (wasapi.SampleFormat, error) {
 		return wasapi.SampleS32, nil
 	case FormatF32LE:
 		return wasapi.SampleF32, nil
+	case FormatS24LE, FormatS243LE:
+		// 24-bit capture (S24_LE stored 24-in-32, and S24_3LE packed in 3 bytes)
+		// is a Linux/ALSA format here. Exclusive WASAPI would need a distinct
+		// negotiation that sets wValidBitsPerSample below the container width, not
+		// yet implemented, so reject it rather than request a layout the endpoint
+		// will not deliver.
+		return 0, &ConfigError{Field: fieldFormat, Reason: "24-bit capture (s24_le, s24_3le) is Linux-only"}
 	default:
-		return 0, &ConfigError{Field: "format", Reason: "must be s16, s32, or f32"}
+		return 0, &ConfigError{Field: fieldFormat, Reason: "must be s16, s32, or f32"}
 	}
 }
 

@@ -156,6 +156,11 @@ type ConfigError struct {
 	Reason string
 }
 
+// fieldFormat is the ConfigError.Field token for the sample format. It is named
+// once because it is the only field reported from both the shared code and the
+// per-platform Open paths, so the token cannot drift and stays a single literal.
+const fieldFormat = "format"
+
 func (e *ConfigError) Error() string {
 	return fmt.Sprintf("capture: invalid config: %s: %s", e.Field, e.Reason)
 }

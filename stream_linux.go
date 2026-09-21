@@ -201,12 +201,16 @@ func alsaFormat(f Format) (uint32, error) {
 	switch f {
 	case FormatS16LE:
 		return alsa.FormatS16LE, nil
+	case FormatS24LE:
+		return alsa.FormatS24LE, nil
+	case FormatS243LE:
+		return alsa.FormatS243LE, nil
 	case FormatS32LE:
 		return alsa.FormatS32LE, nil
 	case FormatF32LE:
 		return alsa.FormatFloatLE, nil
 	default:
-		return 0, &ConfigError{Field: "format", Reason: "must be s16, s32, or f32"}
+		return 0, &ConfigError{Field: fieldFormat, Reason: "must be s16, s24_le, s24_3le, s32, or f32"}
 	}
 }
 

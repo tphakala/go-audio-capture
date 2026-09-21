@@ -159,6 +159,8 @@ func TestWaFormat(t *testing.T) {
 		{FormatS16LE, wasapi.SampleS16, false},
 		{FormatS32LE, wasapi.SampleS32, false},
 		{FormatF32LE, wasapi.SampleF32, false},
+		{FormatS24LE, 0, true},  // Linux-only: 24-in-32 WASAPI negotiation not implemented
+		{FormatS243LE, 0, true}, // Linux-only: WASAPI rejects the 3-byte-packed layout
 		{Format(99), 0, true},
 	}
 	for _, tt := range tests {

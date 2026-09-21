@@ -80,8 +80,10 @@ const (
 	AccessRWInterleaved = 3
 
 	FormatS16LE   = 2
+	FormatS24LE   = 6 // SNDRV_PCM_FORMAT_S24_LE: signed 24-bit LE in the low 3 bytes of a 4-byte word
 	FormatS32LE   = 10
 	FormatFloatLE = 14 // SNDRV_PCM_FORMAT_FLOAT_LE: 32-bit IEEE-754 little-endian
+	FormatS243LE  = 32 // SNDRV_PCM_FORMAT_S24_3LE: signed 24-bit LE packed in 3 bytes
 
 	SubformatSTD = 0
 )
