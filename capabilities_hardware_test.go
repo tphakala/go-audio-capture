@@ -25,7 +25,7 @@ func TestHardwareSupportedRates(t *testing.T) {
 		t.Skip("set GAC_HW_TEST=hw:card,device to run")
 	}
 	for _, ch := range []int{1, 2} {
-		for _, f := range []Format{FormatS16LE, FormatS32LE} {
+		for _, f := range []Format{FormatS16LE, FormatS24LE, FormatS243LE, FormatS32LE} {
 			rs, err := SupportedRates(dev, ch, f)
 			t.Logf("%s ch=%d %s -> rates=%v range=[%d,%d] err=%v", dev, ch, f, rs.Rates, rs.Min, rs.Max, err)
 		}

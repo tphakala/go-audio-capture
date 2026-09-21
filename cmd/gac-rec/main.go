@@ -24,7 +24,7 @@ func main() {
 	device := flag.String("d", defaultDevice, "capture device id (Linux: a stable id from -list, or hw:card,device; Windows: WASAPI endpoint id, or empty/\"default\")")
 	rate := flag.Int("r", 48000, "sample rate in Hz")
 	channels := flag.Int("c", 1, "channel count")
-	format := flag.String("f", "s16", "sample format: s16, s32, or f32")
+	format := flag.String("f", "s16", "sample format: s16, s24_le, s24_3le, s32, or f32")
 	dur := flag.Duration("t", 10*time.Second, "record duration")
 	out := flag.String("o", "out.wav", "output WAV file")
 	list := flag.Bool("list", false, "list capture devices and exit")
@@ -118,6 +118,11 @@ func record(device string, rate, channels int, format string, dur time.Duration,
 			return rerr
 		}
 		wb := frames * frameBytes
+		if f == capture.FormatS24LE {
+			// ALSA S24_LE keeps the 24 valid bits in the low 3 bytes; a 32-bit WAV
+			// player expects them left-aligned. Shift so the file plays correctly.
+			leftAlignS24LE(buf[:wb])
+		}
 		if _, werr := w.Write(buf[:wb]); werr != nil {
 			return werr
 		}
@@ -219,6 +224,20 @@ func (lay wavLayout) patchSizes(w *os.File, dataBytes int64, frameBytes int) err
 		}
 	}
 	return nil
+}
+
+// leftAlignS24LE rewrites ALSA S24_LE samples in place for WAV output. Each
+// sample is 24 valid bits in the low 3 bytes of a 4-byte little-endian word, with
+// the top byte device-dependent (zero padding or sign extension). A 32-bit PCM
+// WAV expects left-aligned samples, so shifting each word left by 8 bits moves the
+// 24 bits (and the sign bit at bit 23) into the high 24 bits, discarding the
+// device's padding byte. The result plays at the correct level and sign for both
+// zero-padded and sign-extended devices. buf's length must be a multiple of 4.
+func leftAlignS24LE(buf []byte) {
+	for i := 0; i+4 <= len(buf); i += 4 {
+		v := int32(binary.LittleEndian.Uint32(buf[i : i+4]))
+		binary.LittleEndian.PutUint32(buf[i:i+4], uint32(v<<8))
+	}
 }
 
 func fatal(err error) {

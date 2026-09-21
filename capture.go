@@ -2,10 +2,10 @@ package capture
 
 import "fmt"
 
-// Format is a PCM sample format: signed 16- or 32-bit little-endian integer, or
-// 32-bit IEEE-754 little-endian float. As everywhere else in this library, the
-// requested format is negotiated with the hardware exactly or Open fails; there
-// is no silent sample-format conversion.
+// Format is a PCM sample format: signed 16-, 24-, or 32-bit little-endian
+// integer, or 32-bit IEEE-754 little-endian float. As everywhere else in this
+// library, the requested format is negotiated with the hardware exactly or Open
+// fails; there is no silent sample-format conversion.
 type Format int
 
 const (
@@ -19,6 +19,28 @@ const (
 	// not, in which case Open fails with a typed *BadFormatError rather than
 	// converting, on both Linux and Windows).
 	FormatF32LE
+	// FormatS243LE is signed 24-bit little-endian integer PCM packed in 3 bytes
+	// (ALSA SNDRV_PCM_FORMAT_S24_3LE), the native capture format of USB Audio
+	// Class microphones that offer only 24-bit. It is Linux-only: the Windows
+	// WASAPI backend rejects it with a *ConfigError, because exclusive WASAPI
+	// exposes 24-bit as 24-in-32, not this 3-byte-packed layout. Like every
+	// format here it is passthrough: Read delivers the raw 3-byte little-endian
+	// samples and Negotiated reports FormatS243LE; the library never widens or
+	// converts them.
+	FormatS243LE
+	// FormatS24LE is signed 24-bit little-endian integer PCM: 24 valid bits in the
+	// low 3 bytes of a 4-byte little-endian word (ALSA SNDRV_PCM_FORMAT_S24_LE),
+	// the 24-bit layout many professional USB and PCI interfaces deliver.
+	// BytesPerSample is 4, not 3: the sample occupies a full 32-bit word carrying
+	// 24 valid bits. Because this is passthrough, the most significant byte is
+	// whatever the device wrote there (zero padding on some devices, sign
+	// extension on others), so a consumer must not assume the four bytes already
+	// form a sign-extended int32. It is Linux-only for now; the Windows WASAPI
+	// backend rejects it with a *ConfigError, since a 24-valid-bits-in-32 endpoint
+	// negotiation is not yet implemented there. Read delivers the raw 4-byte words
+	// and Negotiated reports FormatS24LE; the library never masks, shifts, or
+	// converts them.
+	FormatS24LE
 )
 
 // BytesPerSample returns the size of one sample in bytes, or 0 for an unknown
@@ -27,7 +49,9 @@ func (f Format) BytesPerSample() int {
 	switch f {
 	case FormatS16LE:
 		return 2
-	case FormatS32LE, FormatF32LE:
+	case FormatS243LE:
+		return 3
+	case FormatS24LE, FormatS32LE, FormatF32LE:
 		return 4
 	default:
 		return 0
@@ -43,6 +67,10 @@ func (f Format) String() string {
 	switch f {
 	case FormatS16LE:
 		return "s16"
+	case FormatS24LE:
+		return "s24_le"
+	case FormatS243LE:
+		return "s24_3le"
 	case FormatS32LE:
 		return "s32"
 	case FormatF32LE:
@@ -52,18 +80,23 @@ func (f Format) String() string {
 	}
 }
 
-// ParseFormat maps a short format token ("s16", "s32", "f32") to a Format. It is
-// the inverse of Format.String and returns a *ConfigError for an unknown token.
+// ParseFormat maps a short format token ("s16", "s24_le", "s24_3le", "s32",
+// "f32") to a Format. It is the inverse of Format.String and returns a
+// *ConfigError for an unknown token.
 func ParseFormat(s string) (Format, error) {
 	switch s {
 	case "s16":
 		return FormatS16LE, nil
+	case "s24_le":
+		return FormatS24LE, nil
+	case "s24_3le":
+		return FormatS243LE, nil
 	case "s32":
 		return FormatS32LE, nil
 	case "f32":
 		return FormatF32LE, nil
 	default:
-		return 0, &ConfigError{Field: "format", Reason: fmt.Sprintf("unknown format %q (want s16, s32, or f32)", s)}
+		return 0, &ConfigError{Field: fieldFormat, Reason: fmt.Sprintf("unknown format %q (want s16, s24_le, s24_3le, s32, or f32)", s)}
 	}
 }
 

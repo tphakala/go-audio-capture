@@ -29,7 +29,9 @@ Non-goals: playback, mobile platforms, full miniaudio parity, pro-audio latency.
 
 ### Sample formats
 
-`FormatS16LE` and `FormatS32LE` (signed 16- and 32-bit little-endian integer) and `FormatF32LE` (32-bit IEEE-754 little-endian float) are the supported capture formats. As with the sample rate, the requested format is negotiated with the hardware exactly or `Open` fails; there is no silent conversion. Float is the native format on macOS CoreAudio (the reason it exists here); on Linux `hw:` devices and Windows exclusive endpoints it is accepted only when the hardware itself offers float, which many do not.
+`FormatS16LE` and `FormatS32LE` (signed 16- and 32-bit little-endian integer) and `FormatF32LE` (32-bit IEEE-754 little-endian float) are the core cross-platform capture formats. As with the sample rate, the requested format is negotiated with the hardware exactly or `Open` fails; there is no silent conversion. Float is the native format on macOS CoreAudio (the reason it exists here); on Linux `hw:` devices and Windows exclusive endpoints it is accepted only when the hardware itself offers float, which many do not.
+
+Two 24-bit integer formats are also supported, on Linux only. `FormatS243LE` (ALSA `S24_3LE`) is packed in 3 bytes (`BytesPerSample` is 3); many USB Audio Class microphones expose only this layout. `FormatS24LE` (ALSA `S24_LE`) carries 24 valid bits in the low 3 bytes of a 4-byte little-endian word (`BytesPerSample` is 4), the layout many professional USB and PCI interfaces deliver; the padding byte is passed through as the device wrote it. Both are passthrough like every other format: `Read` returns the raw samples and `Negotiated` reports the requested format; a consumer that needs 16- or 32-bit widens the samples itself. The Windows backend rejects both with a `*ConfigError`: exclusive WASAPI exposes 24-bit as 24-in-32, and that endpoint negotiation (valid bits below the container width) is not implemented here yet.
 
 ## Phase 1: Linux ALSA
 
