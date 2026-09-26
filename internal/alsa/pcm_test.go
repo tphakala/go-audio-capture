@@ -163,6 +163,7 @@ func TestNegotiateCommitPassesThroughDeviceGone(t *testing.T) {
 
 func TestNegotiateSucceeds(t *testing.T) {
 	var swParamsCalled bool
+	var sw SwParams
 	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
 		switch req {
 		case iocHwRefine:
@@ -179,6 +180,7 @@ func TestNegotiateSucceeds(t *testing.T) {
 			setInterval(hw, ParamBufferSize, 20480, 20480)
 		case iocSwParams:
 			swParamsCalled = true
+			sw = *(*SwParams)(arg)
 		}
 		return nil
 	}
@@ -192,7 +194,15 @@ func TestNegotiateSucceeds(t *testing.T) {
 		t.Errorf("Negotiated = %+v, want %+v", n, want)
 	}
 	if !swParamsCalled {
-		t.Error("Negotiate did not issue SW_PARAMS")
+		t.Fatal("Negotiate did not issue SW_PARAMS")
+	}
+	// A full buffer must stop the stream so an overrun surfaces as EPIPE; a
+	// threshold past the buffer lets the hardware overwrite audio unreported.
+	if sw.StopThreshold != 20480 {
+		t.Errorf("SW_PARAMS stop_threshold = %d, want 20480 (the buffer size)", sw.StopThreshold)
+	}
+	if sw.AvailMin != 5120 || sw.StartThreshold != 20481 {
+		t.Errorf("SW_PARAMS avail_min, start_threshold = %d, %d; want 5120, 20481", sw.AvailMin, sw.StartThreshold)
 	}
 }
 

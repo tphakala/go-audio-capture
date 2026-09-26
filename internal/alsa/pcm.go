@@ -249,13 +249,17 @@ func (p *PCM) Negotiate(rate, channels int, format uint32, periodFrames, periods
 }
 
 // setSwParams sets avail_min to the period size and start_threshold past the
-// buffer boundary so START is always explicit; stop_threshold is maxed so an
-// overrun does not auto-stop the stream (Recover handles overruns).
+// buffer boundary so START is always explicit. stop_threshold is the buffer
+// size (the alsa-lib default): once the buffer fills, the kernel stops the
+// stream in XRUN, the next read fails with EPIPE, and Recover restarts it and
+// counts the overrun. A threshold at or past the boundary never stops the
+// stream, so the hardware silently overwrites unread audio and no overrun is
+// ever reported.
 func (p *PCM) setSwParams(n Negotiated) error {
 	sw := SwParams{
 		AvailMin:       uframes(n.PeriodFrames),
 		StartThreshold: uframes(n.BufferFrames) + 1,
-		StopThreshold:  ^uframes(0),
+		StopThreshold:  uframes(n.BufferFrames),
 		Boundary:       boundary(uframes(n.BufferFrames)),
 	}
 	if err := p.guardedIoctl(iocSwParams, unsafe.Pointer(&sw)); err != nil {
