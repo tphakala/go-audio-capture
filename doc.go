@@ -43,8 +43,9 @@
 // transition, so it does not disturb a device another process holds). It is
 // Linux-only and returns ErrCapabilitiesUnsupported on other platforms.
 //
-// The public API (Devices, Resolve, Open, OpenDevice, Stream, SupportedRates) is platform-neutral;
-// the Linux ALSA implementation lives in the *_linux.go files and internal/alsa,
-// and the Windows WASAPI implementation in the *_windows.go files and
-// internal/wasapi. A macOS CoreAudio backend is planned.
+// The public API (Devices, Resolve, Open, OpenDevice, Stream, SupportedRates,
+// SupportedRatesVerified) is platform-neutral; the Linux ALSA implementation
+// lives in the *_linux.go files and internal/alsa, and the Windows WASAPI
+// implementation in the *_windows.go files and internal/wasapi. A macOS
+// CoreAudio backend is planned.
 package capture
