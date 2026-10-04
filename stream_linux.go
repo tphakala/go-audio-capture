@@ -161,13 +161,13 @@ func (s *Stream) Start() error {
 // more than a handful of recoveries without any frames being delivered, returns
 // a *StallError (which unwraps to ErrDeviceStalled and to the last errno); if
 // one PVERSION probe at that point finds the device gone, it returns
-// ErrDeviceGone instead. Read returns ErrClosed when the stream is closed and ErrDeviceGone when the device
-// disappears (e.g. a USB capture device unplugged mid-stream, including while
-// Read is parked in the driver); any other unrecoverable error is returned
-// unchanged. Any returned error leaves the stream unusable (a short read, fewer
-// frames than requested, is not an error and returns a nil error): the caller
-// must Close it (Read does not release the device fd on its own) and, to resume,
-// Open a new stream.
+// ErrDeviceGone instead. Read returns ErrClosed when the stream is closed and
+// ErrDeviceGone when the device disappears (e.g. a USB capture device
+// unplugged mid-stream, including while Read is parked in the driver); any
+// other unrecoverable error is returned unchanged. Any returned error leaves
+// the stream unusable (a short read, fewer frames than requested, is not an
+// error and returns a nil error): the caller must Close it (Read does not
+// release the device fd on its own) and, to resume, Open a new stream.
 func (s *Stream) Read(buf []byte) (int, error) {
 	if s.closed.Load() {
 		return 0, ErrClosed

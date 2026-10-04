@@ -46,12 +46,13 @@ var standardRates = []int{
 //
 // If the device is held exclusively by another process the open itself fails
 // and the returned error is ErrDeviceInUse; a missing device, or one removed
-// during the query, yields ErrDeviceGone; a channel count or format the device does not support at any
-// rate yields *BadFormatError, which carries the channel range the device does
-// accept for the format. Resolving the device id can also fail before any
-// open, with *BadDeviceError for a malformed id, *DeviceNotFoundError (which
-// unwraps to ErrDeviceGone) when a stable id matches nothing present, or
-// *AmbiguousDeviceError when it matches more than one. In the ErrDeviceInUse and
+// during the query, yields ErrDeviceGone; a channel count or format the device
+// does not support at any rate yields *BadFormatError, which carries the
+// channel range the device does accept for the format. Resolving the device
+// id can also fail before any open, with *BadDeviceError for a malformed id,
+// *DeviceNotFoundError (which unwraps to ErrDeviceGone) when a stable id
+// matches nothing present, or *AmbiguousDeviceError when it matches more than
+// one. In the ErrDeviceInUse and
 // ErrDeviceGone cases the caller should fall back to a static rate list rather
 // than treating the query as authoritative.
 func SupportedRates(device string, channels int, format Format) (RateSupport, error) {
