@@ -136,7 +136,7 @@ rs, err := capture.SupportedRates(devs[0].ID, 1, capture.FormatS16LE)
 // rs.Min, rs.Max == 192000, 384000                // raw HW_REFINE window
 ```
 
-If the device is held exclusively by another process the query returns `ErrDeviceInUse`; a channel/format combination the hardware cannot do at any rate returns `*BadFormatError`; a removed device returns `ErrDeviceGone`. In each case the caller should fall back to a static rate list. `SupportedRates` is Linux-only for now and returns `ErrCapabilitiesUnsupported` on other platforms.
+If the device is held exclusively by another process the query returns `ErrDeviceInUse`; a channel/format combination the hardware cannot do at any rate returns `*BadFormatError`, which carries the channel range the device accepts for that format in `MinChannels` and `MaxChannels` (bounds only: a device taking 1, 2 or 8 channels reports 1..8); a removed device returns `ErrDeviceGone`. In each case the caller should fall back to a static rate list. `SupportedRates` is Linux-only for now and returns `ErrCapabilitiesUnsupported` on other platforms.
 
 `cmd/gac-rec` is a small debug recorder used for hardware validation:
 
@@ -144,6 +144,8 @@ If the device is held exclusively by another process the query returns `ErrDevic
 go run ./cmd/gac-rec -list
 go run ./cmd/gac-rec -d 'usb:16d0:06f3:s=0384_2474750763FA81C9:if=0,0' -r 256000 -c 1 -f s16 -t 10s -o out.wav
 go run ./cmd/gac-rec -d hw:1,0 -r 256000 -c 1 -f s16 -t 10s -o out.wav   # the unstable address still works
+go run ./cmd/gac-rec -d hw:1,0 -r 48000 -c 2 -f s16 -p 1000 -n 3 -t 10s   # request a period geometry (-p frames, -n periods)
+go run ./cmd/gac-rec -d hw:1,0 -c 2 -f s16 -rates                        # SupportedRates and SupportedRatesVerified, with timing
 ```
 
 Validated against the `snd-aloop` loopback (the same kernel ioctl path as a physical card) at 48/192/384 kHz S16 and 48 kHz S32, FFT-verified: a 60 kHz tone at 384 kHz round-trips with all spectral energy above 24 kHz and zero xruns, the exact ultrasonic case dsnoop broke. On real hardware it has captured from a 384 kHz AudioMoth, a ZOOM AMS-24 and a Focusrite Scarlett Solo 4th Gen, on amd64 and on arm64 (Raspberry Pi 4), including unplug, busy-device and forced-overrun tests.
@@ -190,7 +192,8 @@ What a caller sees for each failure, and what to do about it. Anything `Read` re
 | Condition | Error | What to do |
 |---|---|---|
 | Rate not supported | `*BadRateError` (carries the supported range) | pick a supported rate; `SupportedRates` lists them on Linux |
-| Channel count or sample format not supported | `*BadFormatError` | pick another layout |
+| Channel count or sample format not supported | `*BadFormatError` (Linux: carries the accepted channel range) | pick another layout |
+| Period geometry refused (Linux) | `*GeometryError` (wraps the driver's errno) | pass other `PeriodFrames`/`Periods`, or another rate or format; `SupportedRatesVerified` lists the rates that commit at the default geometry |
 | Device held by another application | `ErrDeviceInUse`, returned at once | retry later with a backoff |
 | Exclusive access disabled for the endpoint (Windows) | `ErrExclusiveNotAllowed` | the user changes the endpoint setting |
 | Configured device not attached | `ErrDeviceGone` (`*DeviceNotFoundError` for a stable id on Linux) | wait for it to reappear (`Resolve`), then open |

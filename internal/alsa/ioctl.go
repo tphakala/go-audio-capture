@@ -54,6 +54,7 @@ var (
 	iocPVersion    = ioc(iocRead, iocMagic, 0x00, unsafe.Sizeof(int32(0)))
 	iocHwRefine    = ioc(iocRead|iocWrite, iocMagic, 0x10, unsafe.Sizeof(HwParams{}))
 	iocHwParams    = ioc(iocRead|iocWrite, iocMagic, 0x11, unsafe.Sizeof(HwParams{}))
+	iocHwFree      = ioc(iocNone, iocMagic, 0x12, 0)
 	iocSwParams    = ioc(iocRead|iocWrite, iocMagic, 0x13, unsafe.Sizeof(SwParams{}))
 	iocPrepare     = ioc(iocNone, iocMagic, 0x40, 0)
 	iocStart       = ioc(iocNone, iocMagic, 0x42, 0)

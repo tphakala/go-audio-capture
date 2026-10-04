@@ -494,6 +494,47 @@ func TestOpenMapsUnsupportedFormat(t *testing.T) {
 	if bfe.Channels != 1 || bfe.Format != FormatS16LE || bfe.Rate != 0 {
 		t.Errorf("BadFormatError = %+v, want {Rate:0, Channels:1, Format:s16}", bfe)
 	}
+	if bfe.MinChannels != 0 || bfe.MaxChannels != 0 {
+		t.Errorf("channel range = %d..%d, want 0..0 when the backend reports none", bfe.MinChannels, bfe.MaxChannels)
+	}
+}
+
+// TestOpenMapsUnsupportedFormatWithRange checks the channel range the device
+// accepts reaches the public error.
+func TestOpenMapsUnsupportedFormatWithRange(t *testing.T) {
+	fp := &fakePCM{negErr: &alsa.BadFormatError{Channels: 1, Format: alsa.FormatS32LE, MinChannels: 4, MaxChannels: 4}}
+	defer swapOpenPCM(fp)()
+	_, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS32LE})
+	var bfe *BadFormatError
+	if !errors.As(err, &bfe) {
+		t.Fatalf("Open with unsupported format = %v, want *BadFormatError", err)
+	}
+	if bfe.MinChannels != 4 || bfe.MaxChannels != 4 {
+		t.Errorf("channel range = %d..%d, want 4..4", bfe.MinChannels, bfe.MaxChannels)
+	}
+}
+
+// TestOpenMapsGeometryError checks a refused period geometry surfaces as the
+// public *GeometryError, not as a bad rate or a config error.
+func TestOpenMapsGeometryError(t *testing.T) {
+	fp := &fakePCM{negErr: &alsa.GeometryError{Rate: 44100, PeriodFrames: 896, Periods: 4, Err: unix.EINVAL}}
+	defer swapOpenPCM(fp)()
+	_, err := Open(Config{Device: hwAddrCard1, Rate: 44100, Channels: 2, Format: FormatS16LE})
+	var ge *GeometryError
+	if !errors.As(err, &ge) {
+		t.Fatalf("Open = %v, want *GeometryError", err)
+	}
+	if ge.Rate != 44100 || ge.PeriodFrames != 896 || ge.Periods != 4 {
+		t.Errorf("GeometryError = %+v, want 44100 Hz, 896 x 4", ge)
+	}
+	if !errors.Is(err, unix.EINVAL) {
+		t.Errorf("GeometryError does not unwrap to EINVAL: %v", err)
+	}
+	var bre *BadRateError
+	var ce *ConfigError
+	if errors.As(err, &bre) || errors.As(err, &ce) {
+		t.Errorf("geometry refusal reported as %T", err)
+	}
 }
 
 // TestOpenMapsBadRate confirms the existing rate path still yields a public

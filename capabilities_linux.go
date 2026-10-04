@@ -46,7 +46,8 @@ var standardRates = []int{
 // If the device is held exclusively by another process the open itself fails
 // and the returned error is ErrDeviceInUse; a missing or removed device yields
 // ErrDeviceGone; a channel count or format the device does not support at any
-// rate yields *BadFormatError. Resolving the device id can also fail before any
+// rate yields *BadFormatError, which carries the channel range the device does
+// accept for the format. Resolving the device id can also fail before any
 // open, with *BadDeviceError for a malformed id, *DeviceNotFoundError (which
 // unwraps to ErrDeviceGone) when a stable id matches nothing present, or
 // *AmbiguousDeviceError when it matches more than one. In the ErrDeviceInUse and
@@ -57,7 +58,12 @@ func SupportedRates(device string, channels int, format Format) (RateSupport, er
 	if err != nil {
 		return RateSupport{}, err
 	}
-	return supportedRatesAt(r, channels, format)
+	p, err := openQuery(r)
+	if err != nil {
+		return RateSupport{}, err
+	}
+	defer func() { _ = p.Close() }()
+	return queryRates(p, channels, format)
 }
 
 // prepareQuery validates the query's cheap, device-independent inputs (channel
@@ -77,34 +83,39 @@ func prepareQuery(device string, channels int, format Format) (resolved, error) 
 	return resolveForOpen(device)
 }
 
-// supportedRatesAt runs the HW_REFINE pass against an already-resolved device.
-// It derives the ALSA format from format itself rather than taking a separate af
-// argument, so the value fed to the ioctl and the one named in a BadFormatError
-// cannot disagree.
-func supportedRatesAt(r resolved, channels int, format Format) (RateSupport, error) {
+// openQuery opens the device for a capability query and runs the post-open
+// identity check, returning the open PCM. The short-lived query open races a
+// replug exactly as a streaming open does, so rates reported for the wrong card
+// (worse than none) are prevented the same way. On error nothing is left open.
+func openQuery(r resolved) (ratePCM, error) {
+	p, err := openRatePCM(r.card, r.device)
+	if err != nil {
+		return nil, translateQueryError(err)
+	}
+	if err := verifyCardIdentity(r.card, r.device, r.verifyID); err != nil {
+		_ = p.Close()
+		return nil, err
+	}
+	return p, nil
+}
+
+// queryRates runs the HW_REFINE pass on an open device. It derives the ALSA
+// format from format itself rather than taking a separate af argument, so the
+// value fed to the ioctl and the one named in a BadFormatError cannot disagree.
+func queryRates(p ratePCM, channels int, format Format) (RateSupport, error) {
 	af, err := alsaFormat(format)
 	if err != nil {
 		return RateSupport{}, err
 	}
-	p, err := openRatePCM(r.card, r.device)
-	if err != nil {
-		return RateSupport{}, translateQueryError(err)
-	}
-	defer func() { _ = p.Close() }()
-
-	// The short-lived query open races a replug exactly as a streaming open
-	// does, so it gets the same post-open identity check: rates reported for
-	// the wrong card are worse than no rates at all.
-	if err := verifyCardIdentity(r.card, r.device, r.verifyID); err != nil {
-		return RateSupport{}, err
-	}
-
 	rates, lo, hi, err := p.SupportedRates(channels, af, standardRates)
 	if err != nil {
-		// The initial unconstrained refine pins access/format/channels and leaves
-		// rate open, so an EINVAL there means the hardware rejects this
-		// channel/format combo outright (not merely a rate): report it as a typed
-		// BadFormatError rather than leaking the internal ioctl string.
+		// The backend rejects this channel/format combo outright (not merely a
+		// rate): report it as a typed BadFormatError, with the channel range it
+		// accepts, rather than leaking the internal error. The EINVAL fallback
+		// covers a backend that returns the raw errno.
+		if abfe, ok := errors.AsType[*alsa.BadFormatError](err); ok {
+			return RateSupport{}, &BadFormatError{Channels: channels, Format: format, MinChannels: abfe.MinChannels, MaxChannels: abfe.MaxChannels}
+		}
 		if errors.Is(err, unix.EINVAL) {
 			return RateSupport{}, &BadFormatError{Channels: channels, Format: format}
 		}
@@ -114,31 +125,47 @@ func supportedRatesAt(r resolved, channels int, format Format) (RateSupport, err
 }
 
 // SupportedRatesVerified reports which standard sample rates the device can
-// actually COMMIT, not merely advertise. It first runs the same HW_REFINE pass
-// as SupportedRates (yielding the advertised window and a candidate filter), then
-// re-opens the device once per candidate and issues a full HW_PARAMS commit to
-// confirm the hardware truly delivers that rate. The device id is resolved once
-// and shared between the two passes, so a device swapped in between them cannot
-// be refined as one unit and verified as another.
+// actually COMMIT, not merely advertise. It runs the same HW_REFINE pass as
+// SupportedRates (yielding the advertised window and a candidate filter), then
+// issues a full HW_PARAMS commit for each advertised rate to confirm the hardware
+// truly delivers it. The device is opened once and every commit runs on that one
+// fd (each is released with HW_FREE before the next), under a single identity
+// check, so a device swapped in between the passes cannot be refined as one unit
+// and verified as another.
 //
 // This exists because HW_REFINE over-reports on some USB Audio Class devices:
 // the driver advertises a continuous rate window (e.g. [48000, 384000]) yet only
 // a single firmware-fixed rate actually commits. A refine-only probe would offer
-// rates the device silently rejects at open; the HW_PARAMS pass drops them.
+// rates the device silently rejects at open; the HW_PARAMS pass drops them. A
+// rate is verified at the default period geometry (Rate/50 frames x 4 periods,
+// moved to the nearest values the device accepts), the same one Open uses when
+// Config leaves PeriodFrames and Periods zero.
 //
-// It is more expensive than SupportedRates (one device open per advertised rate)
-// so it is meant for occasional capability discovery, not a hot path. The
-// per-candidate opens are non-blocking (alsa.OpenPCM, like every query here) so
-// they never wait on a busy device, and each commit is discarded by
-// closing from the SETUP state. Errors map exactly as SupportedRates: a busy or
-// missing device yields ErrDeviceInUse / ErrDeviceGone and the caller should
-// fall back to a static list.
+// It is more expensive than SupportedRates (one commit per advertised rate) so it
+// is meant for occasional capability discovery, not a hot path. The open is
+// non-blocking (alsa.OpenPCM, like every query here) so it never waits on a busy
+// device. Errors map exactly as SupportedRates: a busy or missing device yields
+// ErrDeviceInUse / ErrDeviceGone and the caller should fall back to a static
+// list.
 func SupportedRatesVerified(device string, channels int, format Format) (RateSupport, error) {
 	r, err := prepareQuery(device, channels, format)
 	if err != nil {
 		return RateSupport{}, err
 	}
-	rs, err := supportedRatesAt(r, channels, format)
+	// format was validated in prepareQuery, so this cannot fail here; deriving af
+	// from format (rather than threading it) keeps the two in lockstep.
+	af, err := alsaFormat(format)
+	if err != nil {
+		return RateSupport{}, err
+	}
+	p, err := openQuery(r)
+	if err != nil {
+		return RateSupport{}, err
+	}
+	// Deferred so a panic in VerifyRate still releases the fd.
+	defer func() { _ = p.Close() }()
+
+	rs, err := queryRates(p, channels, format)
 	if err != nil {
 		return RateSupport{}, err
 	}
@@ -146,28 +173,9 @@ func SupportedRatesVerified(device string, channels int, format Format) (RateSup
 		return rs, nil // nothing advertised: nothing to verify
 	}
 
-	// format was validated in prepareQuery, so this cannot fail here; deriving af
-	// from format (rather than threading it) keeps the two in lockstep.
-	af, err := alsaFormat(format)
-	if err != nil {
-		return RateSupport{}, err
-	}
-
 	verified := make([]int, 0, len(rs.Rates))
 	for _, rate := range rs.Rates {
-		// Scope the open in a closure so its Close is deferred: a panic in
-		// VerifyRate then still releases the fd rather than leaking it.
-		ok, verr := func() (bool, error) {
-			p, err := openRatePCM(r.card, r.device)
-			if err != nil {
-				return false, err
-			}
-			defer func() { _ = p.Close() }()
-			if err := verifyCardIdentity(r.card, r.device, r.verifyID); err != nil {
-				return false, err
-			}
-			return p.VerifyRate(channels, af, rate)
-		}()
+		ok, verr := p.VerifyRate(channels, af, rate)
 		if verr != nil {
 			return RateSupport{}, translateQueryError(verr)
 		}

@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/tphakala/go-audio-capture/internal/alsa"
 )
 
 // fakeRatePCM is a hardware-free ratePCM for exercising SupportedRates' public
@@ -248,7 +250,7 @@ func (e *wrappedErrnoError) Unwrap() error { return e.err }
 // TestSupportedRatesRejectsCardSwappedDuringOpen mirrors the streaming Open swap
 // for the capability query: the refine open's own post-open identity check must
 // reject a card swapped into the resolved index in the resolve-to-open window.
-// It pins the verifyCardIdentity call in supportedRatesAt: deleting it lets the
+// It pins the verifyCardIdentity call in openQuery: deleting it lets the
 // query report rates for the wrong card.
 func TestSupportedRatesRejectsCardSwappedDuringOpen(t *testing.T) {
 	proc, sys := buildFixture(t, hostLayout())
@@ -272,12 +274,10 @@ func TestSupportedRatesRejectsCardSwappedDuringOpen(t *testing.T) {
 	}
 }
 
-// TestSupportedRatesVerifiedRejectsCardSwappedPerCandidate pins the SECOND,
-// per-candidate verifyCardIdentity call in SupportedRatesVerified: the refine
-// pass runs clean, then the card is swapped before the first HW_PARAMS commit, so
-// only the per-candidate guard can catch it. Deleting that specific guard lets a
-// device swapped after the refine pass be verified as a different unit.
-func TestSupportedRatesVerifiedRejectsCardSwappedPerCandidate(t *testing.T) {
+// TestSupportedRatesVerifiedRejectsCardSwappedDuringOpen pins the identity check
+// on SupportedRatesVerified's single open: the card is swapped at the open, so
+// only that check can reject it, and VerifyRate must never run on the wrong card.
+func TestSupportedRatesVerifiedRejectsCardSwappedDuringOpen(t *testing.T) {
 	proc, sys := buildFixture(t, hostLayout())
 	setRoots(t, proc, sys)
 
@@ -286,22 +286,62 @@ func TestSupportedRatesVerifiedRejectsCardSwappedPerCandidate(t *testing.T) {
 		serialCard(1, audiomothSerial, "2"),
 		portCard(2, "3"),
 	})
-	opens := 0
+	fake := &fakeRatePCM{
+		rates: []int{48000}, lo: 48000, hi: 48000,
+		verifiable: map[int]bool{48000: true},
+	}
 	withOpenRatePCM(t, func(_, _ int) (ratePCM, error) {
-		opens++
-		if opens == 2 {
-			// Swap only after the refine pass has opened and verified cleanly, so
-			// the refine-pass guard cannot be what rejects the query.
-			sysRoot = swappedSys
-		}
-		return &fakeRatePCM{
-			rates: []int{48000}, lo: 48000, hi: 48000,
-			verifiable: map[int]bool{48000: true},
-		}, nil
+		sysRoot = swappedSys
+		return fake, nil
 	})
 
 	_, err := SupportedRatesVerified(wantSerialID, 1, FormatS16LE)
 	if !errors.Is(err, ErrDeviceGone) {
-		t.Fatalf("SupportedRatesVerified err = %v, want ErrDeviceGone after a per-candidate swap", err)
+		t.Fatalf("SupportedRatesVerified err = %v, want ErrDeviceGone after a swap in the open window", err)
+	}
+	if len(fake.gotVerify) != 0 {
+		t.Errorf("VerifyRate called %v on a swapped card, want none", fake.gotVerify)
+	}
+	if fake.closeCalls != 1 {
+		t.Errorf("Close called %d times, want 1", fake.closeCalls)
+	}
+}
+
+func TestSupportedRatesVerifiedOpensOnce(t *testing.T) {
+	fake := &fakeRatePCM{
+		rates: []int{44100, 48000, 96000}, lo: 44100, hi: 96000,
+		verifiable: map[int]bool{44100: true, 48000: true, 96000: true},
+	}
+	opens := 0
+	withOpenRatePCM(t, func(int, int) (ratePCM, error) { opens++; return fake, nil })
+
+	got, err := SupportedRatesVerified(hwAddrCard1, 2, FormatS16LE)
+	if err != nil {
+		t.Fatalf("SupportedRatesVerified: %v", err)
+	}
+	if !reflect.DeepEqual(got.Rates, []int{44100, 48000, 96000}) {
+		t.Errorf("Rates = %v, want all three verified", got.Rates)
+	}
+	if opens != 1 || fake.closeCalls != 1 {
+		t.Errorf("opens = %d, Close calls = %d; want 1 and 1", opens, fake.closeCalls)
+	}
+	if !reflect.DeepEqual(fake.gotVerify, []int{44100, 48000, 96000}) {
+		t.Errorf("VerifyRate calls = %v, want every advertised rate on the one fake", fake.gotVerify)
+	}
+}
+
+func TestSupportedRatesMapsAlsaBadFormatWithRange(t *testing.T) {
+	fake := &fakeRatePCM{ratesErr: &alsa.BadFormatError{Channels: 1, Format: alsa.FormatS32LE, MinChannels: 4, MaxChannels: 4}}
+	withOpenRatePCM(t, func(int, int) (ratePCM, error) { return fake, nil })
+	_, err := SupportedRates(hwAddrCard1, 1, FormatS32LE)
+	var bfe *BadFormatError
+	if !errors.As(err, &bfe) {
+		t.Fatalf("err = %v, want *BadFormatError", err)
+	}
+	if bfe.Channels != 1 || bfe.Format != FormatS32LE || bfe.MinChannels != 4 || bfe.MaxChannels != 4 {
+		t.Errorf("BadFormatError = %+v, want 1 ch s32 with range 4..4", bfe)
+	}
+	if _, ok := errors.AsType[*alsa.BadFormatError](err); ok {
+		t.Errorf("internal *alsa.BadFormatError leaked to the caller: %v", err)
 	}
 }

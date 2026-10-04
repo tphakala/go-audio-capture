@@ -34,10 +34,7 @@ func TestNegotiateRefusesBadRate(t *testing.T) {
 	// [48000, 48000], so a 256 kHz request must be refused, not substituted.
 	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
 		if req == iocHwRefine {
-			hw := (*HwParams)(arg)
-			setInterval(hw, ParamRate, 48000, 48000)
-			setInterval(hw, ParamPeriodSize, 16, 65536)
-			setInterval(hw, ParamPeriods, 2, 32)
+			return narrowDevice(arg, 48000, 48000)
 		}
 		return nil
 	}
@@ -101,20 +98,22 @@ func TestNegotiateRefinePassesThroughDeviceGone(t *testing.T) {
 	}
 }
 
-func TestNegotiateBadRateOnCommit(t *testing.T) {
+func TestNegotiateRateGapIsBadRate(t *testing.T) {
 	// The rate is inside the reported [rlo, rhi] window so it passes the range
-	// check, but the exact HW_PARAMS commit is rejected with EINVAL (a discrete
-	// gap inside the window). Negotiate must report *BadRateError carrying the
-	// window bounds, not leak the raw HW_PARAMS errno.
+	// check, but the rate-pinned refine rejects it (a discrete gap inside the
+	// window). Negotiate must report *BadRateError carrying the window bounds, and
+	// never reach HW_PARAMS.
+	var hwParams int
 	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
 		switch req {
 		case iocHwRefine:
 			hw := (*HwParams)(arg)
-			setInterval(hw, ParamRate, 44100, 96000)
-			setInterval(hw, ParamPeriodSize, 16, 65536)
-			setInterval(hw, ParamPeriods, 2, 32)
+			if lo, hi := hw.Interval(ParamRate); lo == 44101 && hi == 44101 {
+				return unix.EINVAL
+			}
+			return narrowDevice(arg, 44100, 96000)
 		case iocHwParams:
-			return unix.EINVAL
+			hwParams++
 		}
 		return nil
 	}
@@ -122,27 +121,57 @@ func TestNegotiateBadRateOnCommit(t *testing.T) {
 	_, err := p.Negotiate(44101, 2, FormatS32LE, 882, 4)
 	var bre *BadRateError
 	if !errors.As(err, &bre) {
-		t.Fatalf("Negotiate with HW_PARAMS EINVAL err = %v, want *BadRateError", err)
+		t.Fatalf("Negotiate with rate-pinned refine EINVAL err = %v, want *BadRateError", err)
 	}
 	if bre.Requested != 44101 || bre.Min != 44100 || bre.Max != 96000 {
 		t.Errorf("BadRateError = %+v, want {44101, 44100, 96000}", bre)
+	}
+	if hwParams != 0 {
+		t.Errorf("HW_PARAMS issued %d times after a refused rate, want 0", hwParams)
+	}
+}
+
+func TestNegotiateCommitRefusalIsGeometryError(t *testing.T) {
+	// Every refine passes and the geometry is pinned, then HW_PARAMS is refused
+	// with EINVAL. That is a *GeometryError carrying the committed-with values,
+	// not a *BadRateError: the rate passed the rate-pinned refine.
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		switch req {
+		case iocHwRefine:
+			return narrowDevice(arg, 44100, 96000)
+		case iocHwParams:
+			return unix.EINVAL
+		}
+		return nil
+	}
+	p := newPCM(-1, fake)
+	_, err := p.Negotiate(44100, 2, FormatS32LE, 882, 4)
+	var ge *GeometryError
+	if !errors.As(err, &ge) {
+		t.Fatalf("Negotiate with HW_PARAMS EINVAL err = %v, want *GeometryError", err)
+	}
+	if ge.Rate != 44100 || ge.PeriodFrames != 882 || ge.Periods != 4 {
+		t.Errorf("GeometryError = %+v, want rate 44100, 882 frames x 4 periods", ge)
+	}
+	if !errors.Is(err, unix.EINVAL) {
+		t.Errorf("GeometryError does not unwrap to EINVAL: %v", err)
+	}
+	if _, ok := errors.AsType[*BadRateError](err); ok {
+		t.Errorf("commit refusal reported as *BadRateError: %v", err)
 	}
 }
 
 func TestNegotiateCommitPassesThroughDeviceGone(t *testing.T) {
 	// A device-gone errno at the HW_PARAMS commit (the rate cleared the window
-	// check, then the device vanished) must NOT be relabelled a bad rate: only
-	// EINVAL maps to *BadRateError there, so a device-gone errno passes through
-	// for the public layer to map to ErrDeviceGone. Mirrors the refine-time case.
+	// check, then the device vanished) must NOT be relabelled a bad rate or a
+	// geometry error: only EINVAL maps to *GeometryError there, so a device-gone
+	// errno passes through for the public layer to map to ErrDeviceGone.
 	for _, errno := range []unix.Errno{unix.ENODEV, unix.ENXIO, unix.ENOENT} {
 		t.Run(errno.Error(), func(t *testing.T) {
 			fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
 				switch req {
 				case iocHwRefine:
-					hw := (*HwParams)(arg)
-					setInterval(hw, ParamRate, 44100, 96000)
-					setInterval(hw, ParamPeriodSize, 16, 65536)
-					setInterval(hw, ParamPeriods, 2, 32)
+					return narrowDevice(arg, 44100, 96000)
 				case iocHwParams:
 					return errno
 				}
@@ -151,8 +180,9 @@ func TestNegotiateCommitPassesThroughDeviceGone(t *testing.T) {
 			p := newPCM(-1, fake)
 			_, err := p.Negotiate(48000, 2, FormatS32LE, 960, 4)
 			var bre *BadRateError
-			if errors.As(err, &bre) {
-				t.Fatalf("Negotiate with HW_PARAMS %v = %v, want it NOT a *BadRateError", errno, err)
+			var ge *GeometryError
+			if errors.As(err, &bre) || errors.As(err, &ge) {
+				t.Fatalf("Negotiate with HW_PARAMS %v = %v, want it neither *BadRateError nor *GeometryError", errno, err)
 			}
 			if !errors.Is(err, errno) {
 				t.Errorf("Negotiate with HW_PARAMS %v = %v, want it to unwrap to %v", errno, err, errno)
@@ -167,10 +197,7 @@ func TestNegotiateSucceeds(t *testing.T) {
 	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
 		switch req {
 		case iocHwRefine:
-			hw := (*HwParams)(arg)
-			setInterval(hw, ParamRate, 8000, 384000)
-			setInterval(hw, ParamPeriodSize, 16, 65536)
-			setInterval(hw, ParamPeriods, 2, 32)
+			return narrowDevice(arg, 8000, 384000)
 		case iocHwParams:
 			// Kernel resolves every param to a single value on commit.
 			hw := (*HwParams)(arg)

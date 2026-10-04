@@ -17,7 +17,8 @@ import (
 //
 //	GAC_HW_TEST=hw:1,0 go test -run TestHardwareSupportedRates -v
 //
-// It prints the enumerated rate set and raw window for each channel/format
+// It prints the enumerated rate set and raw window (SupportedRates) and the
+// rates that actually commit (SupportedRatesVerified) for each channel/format
 // combination; it asserts nothing, since the supported set is device-specific.
 func TestHardwareSupportedRates(t *testing.T) {
 	dev := os.Getenv("GAC_HW_TEST")
@@ -28,6 +29,8 @@ func TestHardwareSupportedRates(t *testing.T) {
 		for _, f := range []Format{FormatS16LE, FormatS24LE, FormatS243LE, FormatS32LE} {
 			rs, err := SupportedRates(dev, ch, f)
 			t.Logf("%s ch=%d %s -> rates=%v range=[%d,%d] err=%v", dev, ch, f, rs.Rates, rs.Min, rs.Max, err)
+			vs, verr := SupportedRatesVerified(dev, ch, f)
+			t.Logf("%s ch=%d %s -> verified=%v err=%v", dev, ch, f, vs.Rates, verr)
 		}
 	}
 }

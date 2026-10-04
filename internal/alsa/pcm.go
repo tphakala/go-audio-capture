@@ -5,6 +5,7 @@ package alsa
 import (
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"sync"
 	"time"
@@ -79,14 +80,55 @@ func (e *BadRateError) Error() string {
 // otherwise-supported format at an unsupported rate) so the public layer can
 // surface the right typed error instead of leaking the raw ioctl string. Format
 // is the SNDRV_PCM_FORMAT_* id, not the public capture.Format.
+//
+// MinChannels and MaxChannels are the HW_REFINE bounds on the channel count for
+// that format; both are 0 when the format is unsupported at any channel count.
+// They are bounds only: a device with a discrete channel set (1, 2 or 8) reports
+// 1..8.
 type BadFormatError struct {
-	Channels int
-	Format   uint32
+	Channels    int
+	Format      uint32
+	MinChannels int
+	MaxChannels int
 }
 
 func (e *BadFormatError) Error() string {
+	if e.MaxChannels > 0 {
+		return fmt.Sprintf("alsa: %d-channel format id %d not supported (device accepts %d..%d channels)", e.Channels, e.Format, e.MinChannels, e.MaxChannels)
+	}
 	return fmt.Sprintf("alsa: %d-channel format id %d not supported", e.Channels, e.Format)
 }
+
+// GeometryError reports that the device refused every period size and count
+// near the requested ones at a rate, format and channel count that passed
+// HW_REFINE. Rate, PeriodFrames and Periods are the values the commit was
+// attempted with (or the requested ones when no nearby value could be pinned);
+// Err is the driver's error.
+type GeometryError struct {
+	Rate         int
+	PeriodFrames int
+	Periods      int
+	Err          error
+}
+
+func (e *GeometryError) Error() string {
+	return fmt.Sprintf("alsa: device refused period geometry at %d Hz (%d frames x %d periods): %v", e.Rate, e.PeriodFrames, e.Periods, e.Err)
+}
+
+func (e *GeometryError) Unwrap() error { return e.Err }
+
+// errRateRefused is returned by refineGeometry when the rate-pinned refine
+// rejects the exact rate (a discrete gap inside the supported window). Negotiate
+// maps it to *BadRateError; VerifyRate maps it to "not supported".
+var errRateRefused = errors.New("alsa: rate refused at HW_REFINE")
+
+// noNearError reports that refineNear could not pin any value near its target.
+type noNearError struct{ err error }
+
+func (e *noNearError) Error() string {
+	return "alsa: no attainable value near target: " + e.err.Error()
+}
+func (e *noNearError) Unwrap() error { return e.err }
 
 // ioctlError wraps an errno with the name of the ioctl that failed, so callers
 // never see a bare "invalid argument".
@@ -205,7 +247,11 @@ func (p *PCM) guardedIoctl(req uintptr, arg unsafe.Pointer) error {
 // Negotiate configures the hardware for the requested format via HW_REFINE then
 // HW_PARAMS, then sets the software params. periodFrames and periods must be
 // concrete positive values (the public layer computes defaults before calling).
-// The requested rate is honored exactly or the call fails with *BadRateError.
+// The requested rate, channel count and format are honored exactly or the call
+// fails with *BadRateError or *BadFormatError. The period size and count are
+// buffering parameters, not audio conversion: they move to the nearest values the
+// driver accepts (see refineGeometry) and the result is reported in Negotiated.
+// A commit the driver refuses after every refine passed is a *GeometryError.
 func (p *PCM) Negotiate(rate, channels int, format uint32, periodFrames, periods int) (Negotiated, error) {
 	var hw HwParams
 	hw.FillAny()
@@ -216,41 +262,53 @@ func (p *PCM) Negotiate(rate, channels int, format uint32, periodFrames, periods
 
 	// Discover the supported rate range for this format/channel/access combo.
 	// The refine pins access, format, subformat, and channels and leaves rate
-	// open, so an EINVAL here means the hardware rejects that combination
-	// outright (not a rate): report it as a typed format error rather than
-	// leaking the raw ioctl string. Device-gone errnos (ENODEV/ENXIO/ENOENT) are
-	// disjoint from EINVAL and pass through unchanged for the caller to classify.
+	// open, so an EINVAL here (or a rate interval the driver emptied without
+	// EINVAL) means the hardware rejects that combination outright, not a rate:
+	// report it as a typed format error rather than leaking the raw ioctl string.
+	// Device-gone errnos (ENODEV/ENXIO/ENOENT) are disjoint from EINVAL and pass
+	// through unchanged for the caller to classify.
 	if err := p.refine(&hw); err != nil {
 		if errors.Is(err, unix.EINVAL) {
-			return Negotiated{}, &BadFormatError{Channels: channels, Format: format}
+			return Negotiated{}, p.badFormat(channels, format)
 		}
 		return Negotiated{}, err
+	}
+	if hw.IntervalEmpty(ParamRate) {
+		return Negotiated{}, p.badFormat(channels, format)
 	}
 	rlo, rhi := hw.Interval(ParamRate)
 	if uint32(rate) < rlo || uint32(rate) > rhi {
 		return Negotiated{}, &BadRateError{Requested: rate, Min: int(rlo), Max: int(rhi)}
 	}
 
-	// Pin the exact rate and a sane period geometry clamped into the supported
-	// ranges, then commit. A commit failure here (e.g. a discrete-rate gap
-	// inside the range, or an unsupported period size) surfaces honestly rather
-	// than as a substituted configuration. VerifyRate shares pinRateGeometry so the
-	// rate probe and the real open commit identical geometry.
-	hw.pinRateGeometry(rate, periodFrames, periods)
-	// The rate already passed the [rlo, rhi] window check, so an EINVAL at commit
-	// means the exact rate falls in a discrete gap inside that window (or, rarely,
-	// the clamped period geometry was refused). The library surfaces no
-	// period-geometry error and a discrete-rate gap is the dominant cause, so
-	// report a bad rate rather than leaking the raw HW_PARAMS errno.
-	if err := p.hwParams(&hw); err != nil {
-		if errors.Is(err, unix.EINVAL) {
+	// Pin the exact rate, then the period size and count nearest the request that
+	// the driver accepts. A rate refused at the pin is a discrete gap inside the
+	// window. VerifyRate shares refineGeometry so the rate probe and the real open
+	// settle on identical geometry.
+	if err := p.refineGeometry(&hw, rate, periodFrames, periods); err != nil {
+		if errors.Is(err, errRateRefused) {
 			return Negotiated{}, &BadRateError{Requested: rate, Min: int(rlo), Max: int(rhi)}
 		}
 		return Negotiated{}, err
 	}
+	// Every refine passed with the geometry fully pinned, so an EINVAL at commit
+	// is not a format or a window problem. On some USB devices it is the rate
+	// itself, which only the commit resolves; GeometryError's doc says so.
+	chosenPeriod, _ := hw.Interval(ParamPeriodSize)
+	chosenPeriods, _ := hw.Interval(ParamPeriods)
+	if err := p.hwParams(&hw); err != nil {
+		if errors.Is(err, unix.EINVAL) {
+			return Negotiated{}, &GeometryError{Rate: rate, PeriodFrames: int(chosenPeriod), Periods: int(chosenPeriods), Err: err}
+		}
+		return Negotiated{}, err
+	}
 
-	// After HW_PARAMS every interval is resolved to a single value.
+	// After HW_PARAMS every interval is resolved to a single value. A driver may
+	// commit yet substitute another rate; that is never accepted (no conversion).
 	gotRate, _ := hw.Interval(ParamRate)
+	if gotRate != uint32(rate) {
+		return Negotiated{}, &BadRateError{Requested: rate, Min: int(rlo), Max: int(rhi)}
+	}
 	gotPeriod, _ := hw.Interval(ParamPeriodSize)
 	gotPeriods, _ := hw.Interval(ParamPeriods)
 	gotBuffer, _ := hw.Interval(ParamBufferSize)
@@ -447,6 +505,15 @@ func (p *PCM) refine(hw *HwParams) error {
 	return nil
 }
 
+// hwFree releases the HW_PARAMS commit and returns the stream to OPEN
+// (SNDRV_PCM_IOCTL_HW_FREE). The kernel accepts it only in SETUP and PREPARED.
+func (p *PCM) hwFree() error {
+	if err := p.guardedIoctl(iocHwFree, nil); err != nil {
+		return &ioctlError{Op: "HW_FREE", Err: err}
+	}
+	return nil
+}
+
 func (p *PCM) hwParams(hw *HwParams) error {
 	if err := p.guardedIoctl(iocHwParams, unsafe.Pointer(hw)); err != nil {
 		return &ioctlError{Op: "HW_PARAMS", Err: err}
@@ -454,26 +521,17 @@ func (p *PCM) hwParams(hw *HwParams) error {
 	return nil
 }
 
-func clampU32(v, lo, hi uint32) uint32 {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
-}
-
 // DefaultPeriods is the streaming open's default periods-per-buffer count when a
 // caller does not specify one. VerifyRate uses it too, so the rate probe commits
-// with the same geometry the real open will.
+// with the same geometry the real open will (a target, like DefaultPeriodFrames).
 const DefaultPeriods = 4
 
 // DefaultPeriodFrames returns the streaming open's default period length in frames
 // for a sample rate: about 20 ms (rate/50), at least one frame. VerifyRate uses it
 // too so a probed rate is committed with the same period geometry the real open
 // uses by default, never the interval's degenerate minimum (which some USB devices
-// reject at high rates).
+// reject at high rates). It is a target: refineGeometry moves it to the nearest
+// period size the driver accepts.
 func DefaultPeriodFrames(rate int) int {
 	if pf := rate / 50; pf > 0 {
 		return pf
@@ -481,20 +539,195 @@ func DefaultPeriodFrames(rate int) int {
 	return 1
 }
 
-// pinRateGeometry pins the exact rate and a sane period/buffer geometry into the
-// already-refined hw params: periodFrames and periods, each clamped into the
-// current refined interval so a device with strict bounds still gets a valid
-// choice. Negotiate and VerifyRate share this so a rate is verified with the same
-// geometry the streaming open commits by default; the two paths cannot drift for
-// that default geometry (a caller that passes a non-zero custom period/periods to
-// Open bypasses the defaults and is not what VerifyRate models). It assumes hw has
-// been refined for the target format/channel combo.
-func (hw *HwParams) pinRateGeometry(rate, periodFrames, periods int) {
+// refineAll sets Rmask to every parameter and issues HW_REFINE. The kernel clears
+// rmask at the end of each refine and applies constraints only to the parameters
+// it names, so every refine after the first must set it again or the kernel would
+// accept an invalid pin without checking it. (HW_PARAMS sets rmask itself.)
+func (p *PCM) refineAll(hw *HwParams) error {
+	hw.Rmask = ^uint32(0)
+	return p.refine(hw)
+}
+
+// refineGeometry pins the exact rate, then moves the period size and the period
+// count to the nearest values the driver accepts. Interval bounds do not encode
+// step rules (HDA wants period bytes in multiples of 128), so a value inside the
+// bounds can still be refused; refineNear asks the kernel instead of guessing.
+// Rate, channels and format never move (no conversion). It returns
+// errRateRefused when the rate pin is rejected, and *GeometryError when no value
+// near the period size or count can be pinned. Negotiate and VerifyRate share it,
+// so the probe and the open agree for the default geometry. It assumes hw has
+// been refined for the target access/format/channels.
+func (p *PCM) refineGeometry(hw *HwParams, rate, periodFrames, periods int) error {
 	hw.SetIntervalExact(ParamRate, uint32(rate))
-	plo, phi := hw.Interval(ParamPeriodSize)
-	hw.SetIntervalExact(ParamPeriodSize, clampU32(uint32(periodFrames), plo, phi))
-	nlo, nhi := hw.Interval(ParamPeriods)
-	hw.SetIntervalExact(ParamPeriods, clampU32(uint32(periods), nlo, nhi))
+	if err := p.refineAll(hw); err != nil {
+		if errors.Is(err, unix.EINVAL) {
+			return errRateRefused
+		}
+		return err
+	}
+	if lo, hi := hw.Interval(ParamRate); hw.IntervalEmpty(ParamRate) || lo != uint32(rate) || hi != uint32(rate) {
+		return errRateRefused
+	}
+	// Period count rather than buffer size second, because Config.Periods is what
+	// callers set.
+	for _, step := range []struct {
+		param  int
+		target int
+	}{{ParamPeriodSize, periodFrames}, {ParamPeriods, periods}} {
+		if err := p.refineNear(hw, step.param, uint32(step.target)); err != nil {
+			if nn, ok := errors.AsType[*noNearError](err); ok {
+				return &GeometryError{Rate: rate, PeriodFrames: periodFrames, Periods: periods, Err: nn.err}
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// absDiff returns |a-b| without unsigned underflow.
+func absDiff(a, b uint32) uint64 {
+	if a > b {
+		return uint64(a - b)
+	}
+	return uint64(b - a)
+}
+
+// nearCandidate is a value refineNear may pin.
+type nearCandidate struct {
+	value uint32
+	dist  uint64
+}
+
+// refineNear pins param to the accepted value nearest target, after alsa-lib's
+// snd_pcm_hw_param_set_near but bounded: at most two probe refines, two pin
+// refines, no loop. The up probe refines [target, hi] and takes the lowest value
+// the kernel leaves; the down probe refines [lo, target] and takes the highest.
+// The nearer wins and a tie goes to the larger value (a larger period means fewer
+// wakeups and more overrun headroom). A refined bound is not always attainable,
+// so each candidate is pinned and re-refined, falling back to the other one. A
+// non-EINVAL error returns at once; EINVAL or an empty interval just drops a
+// candidate. On success hw holds the pinned value.
+func (p *PCM) refineNear(hw *HwParams, param int, target uint32) error {
+	old := *hw.interval(param)
+	lo, hi := old.Min, old.Max
+
+	probe := func(minV, maxV, flags uint32) (Interval, bool, error) {
+		c := *hw
+		iv := c.interval(param)
+		*iv = Interval{Min: minV, Max: maxV, Flags: flags}
+		if err := p.refineAll(&c); err != nil {
+			if errors.Is(err, unix.EINVAL) {
+				return Interval{}, false, nil
+			}
+			return Interval{}, false, err
+		}
+		got := *c.interval(param)
+		return got, got.Flags&intervalEmpty == 0, nil
+	}
+
+	var cands []nearCandidate
+	var up, down *nearCandidate
+	if target <= hi {
+		minV := max(target, lo)
+		flags := uint32(intervalInteger) | old.Flags&intervalOpenMax
+		if minV == lo {
+			flags |= old.Flags & intervalOpenMin
+		}
+		got, ok, err := probe(minV, hi, flags)
+		if err != nil {
+			return err
+		}
+		if ok {
+			v := got.Min
+			if got.Flags&intervalOpenMin != 0 {
+				v++
+			}
+			up = &nearCandidate{value: v, dist: absDiff(v, target)}
+		}
+	}
+	if target >= lo {
+		maxV := min(target, hi)
+		flags := uint32(intervalInteger) | old.Flags&intervalOpenMin
+		if maxV == hi {
+			flags |= old.Flags & intervalOpenMax
+		}
+		got, ok, err := probe(lo, maxV, flags)
+		if err != nil {
+			return err
+		}
+		if ok && (got.Flags&intervalOpenMax == 0 || got.Max != 0) {
+			v := got.Max
+			if got.Flags&intervalOpenMax != 0 {
+				v--
+			}
+			down = &nearCandidate{value: v, dist: absDiff(v, target)}
+		}
+	}
+	switch {
+	case up != nil && down != nil && down.dist < up.dist:
+		cands = []nearCandidate{*down, *up}
+	case up != nil && down != nil:
+		cands = []nearCandidate{*up, *down}
+	case up != nil:
+		cands = []nearCandidate{*up}
+	case down != nil:
+		cands = []nearCandidate{*down}
+	}
+
+	last := error(unix.EINVAL)
+	for _, c := range cands {
+		pin := *hw
+		pin.SetIntervalExact(param, c.value)
+		if err := p.refineAll(&pin); err != nil {
+			if errors.Is(err, unix.EINVAL) {
+				last = err
+				continue
+			}
+			return err
+		}
+		if lo, hi := pin.Interval(param); pin.IntervalEmpty(param) || lo != c.value || hi != c.value {
+			continue
+		}
+		*hw = pin
+		return nil
+	}
+	return &noNearError{err: last}
+}
+
+// badFormat builds the *BadFormatError for a format/channels combination the
+// first refine rejected, with the channel range the device does accept for the
+// format. A non-EINVAL error from the range probe (the device vanished) is
+// returned instead, so a device loss is not reported as a format problem.
+func (p *PCM) badFormat(channels int, format uint32) error {
+	lo, hi, err := p.channelRange(format)
+	if err != nil {
+		return err
+	}
+	return &BadFormatError{Channels: channels, Format: format, MinChannels: lo, MaxChannels: hi}
+}
+
+// channelRange returns the channel counts HW_REFINE leaves open for the format
+// with the channel count unpinned. It returns 0, 0 when the format is unsupported
+// at any channel count (EINVAL, or an emptied channel or rate interval). The
+// range is a bound, not a set: a device with discrete counts 1, 2 and 8 yields
+// 1..8.
+func (p *PCM) channelRange(format uint32) (lo, hi int, err error) {
+	var hw HwParams
+	hw.FillAny()
+	hw.SetMask(ParamAccess, AccessRWInterleaved)
+	hw.SetMask(ParamFormat, uint(format))
+	hw.SetMask(ParamSubformat, SubformatSTD)
+	if rerr := p.refine(&hw); rerr != nil {
+		if errors.Is(rerr, unix.EINVAL) {
+			return 0, 0, nil
+		}
+		return 0, 0, rerr
+	}
+	if hw.IntervalEmpty(ParamChannels) || hw.IntervalEmpty(ParamRate) {
+		return 0, 0, nil
+	}
+	clo, chi := hw.Interval(ParamChannels)
+	return int(min(clo, math.MaxInt32)), int(min(chi, math.MaxInt32)), nil
 }
 
 // boundary returns a pointer-wrap boundary that is a power-of-two multiple of the

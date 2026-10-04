@@ -54,11 +54,15 @@ type Stream struct {
 // Open configures and opens a capture stream. It negotiates the exact requested
 // rate (failing with *BadRateError otherwise), applies the 20 ms / 4-period
 // defaults, and returns a stream that is prepared but not yet started; call
-// Start before Read. On failure it returns a typed error: *BadDeviceError for a
+// Start before Read. The period size and count are buffering parameters: the
+// device may move them to the nearest values it accepts, and Negotiated reports
+// the result. On failure it returns a typed error: *BadDeviceError for a
 // malformed device id, *DeviceNotFoundError (which unwraps to ErrDeviceGone) when
 // a well-formed stable id matches no present device, *AmbiguousDeviceError when
 // it matches more than one, *BadRateError for an unsupported rate,
-// *BadFormatError for an unsupported channel/format combination, ErrDeviceInUse
+// *BadFormatError for an unsupported channel/format combination,
+// *GeometryError when the device refuses every period geometry near the
+// requested one, ErrDeviceInUse
 // when another application holds the device (Open fails at once rather than
 // waiting for it to be released), and ErrDeviceGone when the device is missing or
 // was removed.
@@ -269,7 +273,8 @@ func alsaFormat(f Format) (uint32, error) {
 // translateOpenError converts the errors the open-and-negotiate path can return
 // into the public typed errors so callers never import internal/alsa: an
 // unsupported rate becomes *BadRateError, an unsupported channel/format
-// combination becomes *BadFormatError, a device held by another application
+// combination becomes *BadFormatError (with the channel range the device
+// accepts), a period geometry the device refuses becomes *GeometryError, a device held by another application
 // becomes ErrDeviceInUse, and a device that is missing or was removed becomes
 // ErrDeviceGone. channels and format come from the requested Config so the
 // public *BadFormatError carries them. The EBUSY and device-gone mapping mirrors
@@ -282,7 +287,10 @@ func translateOpenError(err error, channels int, format Format) error {
 	}
 	var bfe *alsa.BadFormatError
 	if errors.As(err, &bfe) {
-		return &BadFormatError{Channels: channels, Format: format}
+		return &BadFormatError{Channels: channels, Format: format, MinChannels: bfe.MinChannels, MaxChannels: bfe.MaxChannels}
+	}
+	if ge, ok := errors.AsType[*alsa.GeometryError](err); ok {
+		return &GeometryError{Rate: ge.Rate, PeriodFrames: ge.PeriodFrames, Periods: ge.Periods, Err: ge.Err}
 	}
 	if errors.Is(err, unix.EBUSY) {
 		return ErrDeviceInUse

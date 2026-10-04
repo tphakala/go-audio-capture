@@ -28,6 +28,9 @@ func main() {
 	dur := flag.Duration("t", 10*time.Second, "record duration")
 	out := flag.String("o", "out.wav", "output WAV file")
 	list := flag.Bool("list", false, "list capture devices and exit")
+	periodFrames := flag.Int("p", 0, "period size in frames (0 = default, rate/50 on Linux); the device may adjust it")
+	periods := flag.Int("n", 0, "periods per buffer (0 = default, 4 on Linux); the device may adjust it")
+	rates := flag.Bool("rates", false, "print SupportedRates and SupportedRatesVerified for -d/-c/-f with elapsed time, then exit")
 	flag.Parse()
 
 	if *list {
@@ -36,7 +39,13 @@ func main() {
 		}
 		return
 	}
-	if err := record(*device, *rate, *channels, *format, *dur, *out); err != nil {
+	if *rates {
+		if err := printRates(*device, *channels, *format); err != nil {
+			fatal(err)
+		}
+		return
+	}
+	if err := record(*device, *rate, *channels, *format, *periodFrames, *periods, *dur, *out); err != nil {
 		fatal(err)
 	}
 }
@@ -78,18 +87,46 @@ func listNotes(d *capture.DeviceInfo) string {
 	return strings.Join(notes, "; ")
 }
 
-func record(device string, rate, channels int, format string, dur time.Duration, out string) error {
+// printRates prints what the refine-only and the committing rate queries report
+// for one device/channels/format, with how long each took. A query error is
+// printed rather than returned, so the other query still runs.
+func printRates(device string, channels int, format string) error {
 	f, err := capture.ParseFormat(format)
 	if err != nil {
 		return err
 	}
-	s, err := capture.Open(capture.Config{Device: device, Rate: rate, Channels: channels, Format: f})
+	for _, q := range []struct {
+		name string
+		fn   func(string, int, capture.Format) (capture.RateSupport, error)
+	}{
+		{"SupportedRates", capture.SupportedRates},
+		{"SupportedRatesVerified", capture.SupportedRatesVerified},
+	} {
+		start := time.Now()
+		rs, qerr := q.fn(device, channels, f)
+		elapsed := time.Since(start)
+		if qerr != nil {
+			fmt.Printf("%s: error: %v (%s)\n", q.name, qerr, elapsed)
+			continue
+		}
+		fmt.Printf("%s: rates=%v range=[%d,%d] (%s)\n", q.name, rs.Rates, rs.Min, rs.Max, elapsed)
+	}
+	return nil
+}
+
+func record(device string, rate, channels int, format string, periodFrames, periods int, dur time.Duration, out string) error {
+	f, err := capture.ParseFormat(format)
+	if err != nil {
+		return err
+	}
+	s, err := capture.Open(capture.Config{Device: device, Rate: rate, Channels: channels, Format: f, PeriodFrames: periodFrames, Periods: periods})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = s.Close() }()
 
 	n := s.Negotiated()
+	fmt.Fprintf(os.Stderr, "requested: period %d frames, %d periods (0 = default)\n", periodFrames, periods)
 	fmt.Fprintf(os.Stderr, "negotiated: %d Hz, %d ch, %s, period %d frames, %d periods\n",
 		n.Rate, n.Channels, n.Format, n.PeriodFrames, n.Periods)
 

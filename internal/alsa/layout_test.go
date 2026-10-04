@@ -107,6 +107,7 @@ func TestIoctlNumbers(t *testing.T) {
 		{"PVersion", iocPVersion, wantIocPVersion},
 		{"HwRefine", iocHwRefine, wantIocHwRefine},
 		{"HwParams", iocHwParams, wantIocHwParams},
+		{"HwFree", iocHwFree, wantIocHwFree},
 		{"SwParams", iocSwParams, wantIocSwParams},
 		{"Prepare", iocPrepare, wantIocPrepare},
 		{"Start", iocStart, wantIocStart},
