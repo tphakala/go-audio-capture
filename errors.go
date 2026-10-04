@@ -21,8 +21,9 @@ var ErrDeviceInUse = errors.New("capture: device is in use by another applicatio
 
 // ErrDeviceGone reports that the device disappeared (unplugged, disabled, or
 // otherwise invalidated). Open, Start, and Read all return it when the device is
-// missing or removed; SupportedRates and SupportedRatesVerified return it for a
-// query against a device that is gone; and Resolve returns it wrapped in a
+// missing or removed; on Linux, Read also returns it at the recovery cap when one
+// PVERSION probe finds the device gone; SupportedRates and SupportedRatesVerified
+// return it for a query against a device that is gone or was removed mid-query; and Resolve returns it wrapped in a
 // *DeviceNotFoundError (which unwraps to it) when an id matches nothing present.
 // A caller can therefore retire the device with errors.Is(err, ErrDeviceGone) at
 // any point from resolution through the stream lifecycle. On Windows a Read
@@ -31,7 +32,8 @@ var ErrDeviceInUse = errors.New("capture: device is in use by another applicatio
 var ErrDeviceGone = errors.New("capture: device is gone")
 
 // ErrDeviceStalled reports that the device is present but stopped delivering
-// audio: Stream.Read on Linux returns it (wrapped in a *StallError) when a read
+// audio (one PVERSION probe confirms it still answers; a device found gone is
+// reported as ErrDeviceGone instead): Stream.Read on Linux returns it (wrapped in a *StallError) when a read
 // stall repeats after a restart, or when recovery repeats without any frames
 // being delivered. The stream is unusable; Close it and Open a new one. Windows
 // does not return it yet.

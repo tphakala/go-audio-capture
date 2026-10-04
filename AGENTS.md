@@ -58,13 +58,14 @@ This is the robustness contract. A change to any row is a behaviour change and n
 | Rate not supported | `*BadRateError` (with the supported range) | `*BadRateError` | pick a supported rate (`SupportedRates`) |
 | Channel/format combination not supported | `*BadFormatError` (with the accepted channel range) | `*BadFormatError` (no range) | pick another format or channel count |
 | Period geometry refused (every refine passed, `HW_PARAMS` refused, or no value near the requested period is attainable) | `*GeometryError` | n/a | pass other `PeriodFrames`/`Periods`, or another rate/format; `SupportedRatesVerified` lists the rates that commit at the default geometry |
+| Device removed during `SupportedRates*` | `ErrDeviceGone` (`ENODEV`, or `EBADFD` confirmed by a `PVERSION` probe) | `ErrCapabilitiesUnsupported` | fall back to a static rate list |
 | Device held by another application | `ErrDeviceInUse` at once from `Open` and `SupportedRates*` | `ErrDeviceInUse` | retry later with backoff |
 | Exclusive access disabled for the endpoint | n/a | `ErrExclusiveNotAllowed` | user changes the endpoint setting |
 | Overrun (consumer too slow) | recovered inside `Read`, counted in `Xruns()` | counted in `Xruns()` | nothing; watch the counter |
 | System suspend/resume | resumed or re-prepared inside `Read`, counted | n/a | nothing |
-| Read stall (driver stops delivering, kernel read timeout `EIO`) | one restart inside `Read`, counted; a second stall returns `*StallError` (`ErrDeviceStalled`) | not detected yet | close and reopen |
-| Recovery keeps failing with no frames (9th recoverable failure in one gap) | `*StallError` (`ErrDeviceStalled`) | n/a | close and reopen |
-| Device unplugged mid-stream | `ErrDeviceGone`, including while `Read` is parked | `ErrDeviceGone` once `GetBuffer` sees the invalidation; a parked `Read` is not woken yet | close; wait for the device to reappear |
+| Read stall (driver stops delivering, kernel read timeout `EIO`) | one restart inside `Read`, counted; a second stall returns `*StallError` (`ErrDeviceStalled`); `ErrDeviceGone` instead when a `PVERSION` probe at that point shows the device gone | not detected yet | close and reopen |
+| Recovery keeps failing with no frames (9th recoverable failure in one gap) | `*StallError` (`ErrDeviceStalled`); `ErrDeviceGone` instead when a `PVERSION` probe at that point shows the device gone | n/a | close and reopen |
+| Device unplugged mid-stream | `ErrDeviceGone`, including while `Read` is parked and when the device vanishes during a recovery burst | `ErrDeviceGone` once `GetBuffer` sees the invalidation; a parked `Read` is not woken yet | close; wait for the device to reappear |
 | `Close` from another goroutine | `ErrClosed` | `ErrClosed` | stop reading |
 
 Any error returned by `Read` leaves the stream unusable; the caller must `Close` it. Platform gaps in the Windows column are tracked in GitHub issues and should not be copied as intended behaviour.
@@ -107,7 +108,7 @@ These explain code that otherwise looks odd. Check against `sound/core/pcm_nativ
 - A capture open without `O_NONBLOCK` sleeps while every substream is busy; with it the kernel returns `EBUSY`. `OpenPCM` always opens non-blocking and clears the flag with `fcntl` before `Negotiate`, because the read path takes its blocking mode from a copy of the flags that is refreshed only by `PREPARE`.
 - A successful `RESUME` leaves the stream running, and `PREPARE` on a running stream fails with `EBUSY`, so `Recover` returns after a good resume.
 - A read timeout (`EIO`) leaves the stream running, so stall recovery issues `DROP` before `PREPARE` and `START`.
-- A reader parked in `READI_FRAMES` is woken with `EBADFD` when the PCM is disconnected; after the card disconnects every ioctl on the fd returns `ENODEV`. One `PVERSION` probe tells an unplug from an ordinary state error. `Close`'s own `DROP` also wakes a parked reader with `EBADFD`, which is why `s.closed` is checked first.
+- A reader parked in `READI_FRAMES` is woken with `EBADFD` when the PCM is disconnected; after the card disconnects every ioctl on the fd returns `ENODEV`. One `PVERSION` probe tells an unplug from an ordinary state error; the capability queries (`EBADFD` from `HW_REFINE`/`HW_PARAMS`/`HW_FREE`) and `Read`'s recovery cap use the same probe. `Close`'s own `DROP` also wakes a parked reader with `EBADFD`, which is why `s.closed` is checked first.
 - The capture stop threshold is the buffer size, so an overrun stops the stream with `EPIPE` and is counted, instead of the hardware silently overwriting unread audio.
 - `HW_REFINE` clears `rmask` at its end and applies constraints only to the parameters whose bit is set, so `refineAll` sets `Rmask` before every refine after the first; otherwise the kernel accepts an invalid pin unchecked. `HW_PARAMS` sets `rmask` itself.
 - Interval bounds do not encode step rules (HDA: period bytes a multiple of 128), so a value inside the bounds can still be refused. `refineNear` asks the kernel for the nearest attainable period size and count, then pins and re-refines, instead of clamping into the bounds.

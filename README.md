@@ -83,7 +83,7 @@ for {
 }
 ```
 
-`Read` is single-consumer and blocking; `Close` may be called from another goroutine to unblock it. Overruns, resumes after a system suspend and restarted stalls are recovered internally and counted via `Stream.Xruns()`. On Linux recovery is bounded per `Read` call: a repeated stall, or a ninth recoverable failure (overrun, suspend or stall) after 8 recoveries without any frames delivered, returns a `*StallError` (`errors.Is(err, capture.ErrDeviceStalled)`), after which the stream must be closed and reopened. On Linux a device unplugged while `Read` is parked returns `capture.ErrDeviceGone`. On Linux `Open` on a device held by another application fails at once with `capture.ErrDeviceInUse` instead of waiting for it. The full list is under [Failure handling](#failure-handling).
+`Read` is single-consumer and blocking; `Close` may be called from another goroutine to unblock it. Overruns, resumes after a system suspend and restarted stalls are recovered internally and counted via `Stream.Xruns()`. On Linux recovery is bounded per `Read` call: a repeated stall, or a ninth recoverable failure (overrun, suspend or stall) after 8 recoveries without any frames delivered, returns a `*StallError` (`errors.Is(err, capture.ErrDeviceStalled)`) unless a probe at that point finds the device gone, in which case it returns `capture.ErrDeviceGone`; after a `*StallError` the stream must be closed and reopened. On Linux a device unplugged while `Read` is parked returns `capture.ErrDeviceGone`. On Linux `Open` on a device held by another application fails at once with `capture.ErrDeviceInUse` instead of waiting for it. The full list is under [Failure handling](#failure-handling).
 
 ### Device ids are stable
 
@@ -136,7 +136,7 @@ rs, err := capture.SupportedRates(devs[0].ID, 1, capture.FormatS16LE)
 // rs.Min, rs.Max == 192000, 384000                // raw HW_REFINE window
 ```
 
-If the device is held exclusively by another process the query returns `ErrDeviceInUse`; a channel/format combination the hardware cannot do at any rate returns `*BadFormatError`, which carries the channel range the device accepts for that format in `MinChannels` and `MaxChannels` (bounds only: a device taking 1, 2 or 8 channels reports 1..8); a removed device returns `ErrDeviceGone`. In each case the caller should fall back to a static rate list. `SupportedRates` is Linux-only for now and returns `ErrCapabilitiesUnsupported` on other platforms.
+If the device is held exclusively by another process the query returns `ErrDeviceInUse`; a channel/format combination the hardware cannot do at any rate returns `*BadFormatError`, which carries the channel range the device accepts for that format in `MinChannels` and `MaxChannels` (bounds only: a device taking 1, 2 or 8 channels reports 1..8); a missing device, or one removed during the query, returns `ErrDeviceGone`. In each case the caller should fall back to a static rate list. `SupportedRates` is Linux-only for now and returns `ErrCapabilitiesUnsupported` on other platforms.
 
 `cmd/gac-rec` is a small debug recorder used for hardware validation:
 
@@ -160,7 +160,7 @@ The public API is identical to Linux; only the device string differs. `DeviceInf
 
 - `*BadRateError`: the exact rate is unsupported (carries the endpoint's supported range when it can be determined).
 - `*BadFormatError`: the channel-count / sample-format combination is unsupported. Exclusive endpoints commonly accept only specific layouts (e.g. stereo S16 but not mono), and the library returns this rather than up/down-mixing or converting.
-- `ErrExclusiveNotAllowed`, `ErrDeviceInUse`, `ErrDeviceGone`: exclusive access disabled for the endpoint, held by another application, or the endpoint was invalidated (unplugged) mid-capture.
+- `ErrExclusiveNotAllowed`, `ErrDeviceInUse`, `ErrDeviceGone`: exclusive access disabled for the endpoint, held by another application, or the endpoint was invalidated (unplugged); a `Read` that reaches `GetBuffer` after the invalidation returns `ErrDeviceGone`, but a `Read` already parked waiting for audio is not woken until `Close`.
 
 ```go
 devs, _ := capture.Devices() // []DeviceInfo{ID: "{0.0.1.00000000}.{guid}", Name: "Microphone (...)"}
@@ -200,8 +200,8 @@ What a caller sees for each failure, and what to do about it. Anything `Read` re
 | Two identical units with one serial (Linux) | `*AmbiguousDeviceError` | configure one of the listed ids |
 | Overrun, consumer too slow | none: recovered and counted in `Xruns()` | watch the counter |
 | System suspend and resume (Linux) | none: recovered and counted | nothing |
-| Driver stops delivering audio (Linux) | one restart, counted; if it happens again, `*StallError` (`ErrDeviceStalled`) | close and reopen |
-| Recovery keeps failing with no audio (Linux) | `*StallError` (`ErrDeviceStalled`) | close and reopen |
+| Driver stops delivering audio (Linux) | one restart, counted; if it happens again, `*StallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone) | close and reopen |
+| Recovery keeps failing with no audio (Linux) | `*StallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone) | close and reopen |
 | Device unplugged during capture | `ErrDeviceGone` | close, wait for the device to reappear |
 | `Close` called from another goroutine | `ErrClosed` | stop reading |
 
