@@ -29,7 +29,10 @@
 //     current-boot address that must not be persisted. Resolve reports what an
 //     id currently names without opening it, and OpenDevice opens a DeviceInfo
 //     that Resolve already returned without resolving it again (on Linux it
-//     still confirms after the open that the card is the same unit).
+//     still confirms after the open that the card is the same unit). The one
+//     exception is a Linux USB ID in the serial form with no PortID, which is
+//     resolved again as Open would, because nothing read after the open can
+//     tell two units with one serial apart.
 //   - Robust failure handling for unattended capture. Overruns, system suspend
 //     and driver stalls are recovered inside Stream.Read and counted by
 //     Stream.Xruns; a busy, missing, unplugged or stalled device is reported as
