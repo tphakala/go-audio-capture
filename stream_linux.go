@@ -191,8 +191,8 @@ func (s *Stream) Read(buf []byte) (int, error) {
 		}
 		recoveries++
 		if rerr := s.pcm.Recover(err); rerr != nil {
-			// Recover returns an unrecoverable errno unchanged, and a concurrent
-			// Close can fail its own ioctls with EBADF.
+			// A recovery ioctl failed: a concurrent Close fails it with EBADF,
+			// an unplug with ENODEV or EBADFD, which terminalError classifies.
 			return 0, s.terminalError(rerr)
 		}
 		s.xruns.Add(1)

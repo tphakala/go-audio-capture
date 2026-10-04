@@ -25,7 +25,9 @@ var ErrDeviceInUse = errors.New("capture: device is in use by another applicatio
 // query against a device that is gone; and Resolve returns it wrapped in a
 // *DeviceNotFoundError (which unwraps to it) when an id matches nothing present.
 // A caller can therefore retire the device with errors.Is(err, ErrDeviceGone) at
-// any point from resolution through the stream lifecycle.
+// any point from resolution through the stream lifecycle. On Windows a Read
+// parked while the endpoint is invalidated is not woken yet, so it may not
+// return until Close.
 var ErrDeviceGone = errors.New("capture: device is gone")
 
 // ErrDeviceStalled reports that the device is present but stopped delivering
@@ -90,7 +92,7 @@ func (e *DeviceNotFoundError) Unwrap() error { return ErrDeviceGone }
 // StallError is the concrete error behind ErrDeviceStalled. Recoveries is the
 // number of recoveries attempted in the failing Read, none of which delivered
 // frames; Err is the last READI_FRAMES errno (EIO for a timeout, EPIPE for an
-// overrun, and so on). It unwraps to both ErrDeviceStalled and Err.
+// overrun, ESTRPIPE for a suspend). It unwraps to both ErrDeviceStalled and Err.
 type StallError struct {
 	Recoveries int
 	Err        error
