@@ -81,6 +81,8 @@ func TestSupportedRatesBusyOnUnchangedCardIsDeviceInUse(t *testing.T) {
 	}
 }
 
+const loopbackDev1ID = "hw:CARD=Loopback,DEV=1"
+
 var odCfg = Config{Rate: 48000, Channels: 1, Format: FormatS16LE}
 
 // twinLayout is two same-serial units on ports 3 and 4. swap puts the port-4
@@ -530,6 +532,7 @@ func TestCanonicalStableIDParsedFields(t *testing.T) {
 			canon: "usb:16d0:06f3:p=0000:00:14.0-3:if=2,3", device: 3, usb: true, port: true, vidpid: "16d0:06f3", iface: 2,
 		}},
 		{"hw:CARD=Loopback", parsedID{canon: wantLoopbackID}},
+		{loopbackDev1ID, parsedID{canon: loopbackDev1ID, device: 1}},
 	}
 	for _, tt := range tests {
 		got, err := canonicalStableID(tt.in)
@@ -539,5 +542,56 @@ func TestCanonicalStableIDParsedFields(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("canonicalStableID(%q) = %+v, want %+v", tt.in, got, tt.want)
 		}
+	}
+}
+
+// TestOpenDevicePositiveIDForms opens DeviceInfos whose ID is the port form (a
+// serial-less USB card, where PortID equals ID) or the card form, including a
+// nonzero device number, and shows the post-open check still rejects a different
+// unit at that index for each of them.
+func TestOpenDevicePositiveIDForms(t *testing.T) {
+	// A layout in which index 0 and 1 hold other units than hostLayout's.
+	other := []fakeCard{portCard(0, "3"), serialCard(1, audiomothSerial, "2")}
+	tests := []struct {
+		name       string
+		id         string
+		wantCard   int
+		wantDevice int
+	}{
+		{"port-form id", wantPortID, 1, 0},
+		{"card-form id", wantLoopbackID, 0, 0},
+		{"card-form id, device 1", loopbackDev1ID, 0, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useFixture(t, hostLayout())
+			d := mustResolve(t, tt.id)
+			if d.Card != tt.wantCard || d.Device != tt.wantDevice {
+				t.Fatalf("setup: resolved to %d/%d, want %d/%d", d.Card, d.Device, tt.wantCard, tt.wantDevice)
+			}
+
+			card, device := recordOpen(t)
+			s, err := OpenDevice(d, odCfg)
+			if err != nil {
+				t.Fatalf("OpenDevice: %v", err)
+			}
+			_ = s.Close()
+			if *card != tt.wantCard || *device != tt.wantDevice {
+				t.Errorf("opened %d/%d, want %d/%d", *card, *device, tt.wantCard, tt.wantDevice)
+			}
+
+			_, otherSys := buildFixture(t, other)
+			p := &fakePCM{}
+			withOpenPCM(t, func(_, _ int) (pcm, error) {
+				sysRoot = otherSys
+				return p, nil
+			})
+			if _, err := OpenDevice(d, odCfg); !errors.Is(err, ErrDeviceGone) {
+				t.Fatalf("OpenDevice after the index changed hands: err = %v, want ErrDeviceGone", err)
+			}
+			if p.closeCalls != 1 {
+				t.Errorf("PCM closed %d times, want 1", p.closeCalls)
+			}
+		})
 	}
 }
