@@ -4,13 +4,14 @@ package capture
 
 import (
 	"errors"
+	"strings"
 	"sync/atomic"
 
 	"github.com/tphakala/go-audio-capture/internal/wasapi"
 )
 
 // wasapiDevice is the WASAPI seam that Stream drives; *wasapi.Client satisfies
-// it, and tests inject a fake. openDevice is a package var so tests can
+// it, and tests inject a fake. openEndpoint is a package var so tests can
 // substitute a hardware-free implementation. It mirrors the Linux pcm seam.
 type wasapiDevice interface {
 	Negotiate(rate, channels int, sf wasapi.SampleFormat) (wasapi.Negotiated, error)
@@ -19,7 +20,7 @@ type wasapiDevice interface {
 	Close() error
 }
 
-var openDevice = func(id string) (wasapiDevice, error) {
+var openEndpoint = func(id string) (wasapiDevice, error) {
 	return wasapi.Open(id)
 }
 
@@ -40,18 +41,50 @@ type Stream struct {
 // or ErrDeviceInUse). The returned stream is prepared but not started; call Start
 // before Read.
 func Open(cfg Config) (*Stream, error) {
-	if cfg.Rate <= 0 {
-		return nil, &ConfigError{Field: "rate", Reason: "must be positive"}
-	}
-	if cfg.Channels < 1 {
-		return nil, &ConfigError{Field: "channels", Reason: "must be at least 1"}
-	}
-	sf, err := waFormat(cfg.Format)
+	sf, err := validateStreamConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
+	return openOn(cfg, sf)
+}
 
-	dev, err := openDevice(cfg.Device)
+// OpenDevice opens the endpoint a DeviceInfo from Devices or Resolve names. On
+// Windows Open already resolves the endpoint id directly, without enumerating,
+// so this is Open with Config.Device set to d.ID; it exists so code written for
+// Linux, where it skips an enumeration, can open what Resolve returned on both
+// platforms. Config.Device is ignored and Negotiated reports d.ID as the device.
+// An empty d.ID is a *ConfigError (field "device") rather than the default
+// endpoint, because Resolve returns the concrete endpoint id; use Open with ""
+// or "default" for the default endpoint.
+//
+//nolint:gocritic // hugeParam: OpenDevice runs once per stream, and a value parameter has no nil case and takes a Resolve result or a map element directly.
+func OpenDevice(d DeviceInfo, cfg Config) (*Stream, error) {
+	sf, err := validateStreamConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(d.ID) == "" {
+		return nil, &ConfigError{Field: "device", Reason: "DeviceInfo.ID is empty; pass a DeviceInfo from Devices or Resolve"}
+	}
+	cfg.Device = d.ID
+	return openOn(cfg, sf)
+}
+
+// validateStreamConfig runs the endpoint-independent checks shared by Open and
+// OpenDevice, in the same order as on Linux: rate, channels, then format.
+func validateStreamConfig(cfg Config) (wasapi.SampleFormat, error) {
+	if cfg.Rate <= 0 {
+		return 0, &ConfigError{Field: "rate", Reason: "must be positive"}
+	}
+	if cfg.Channels < 1 {
+		return 0, &ConfigError{Field: "channels", Reason: "must be at least 1"}
+	}
+	return waFormat(cfg.Format)
+}
+
+// openOn opens the endpoint named by cfg.Device and negotiates cfg on it.
+func openOn(cfg Config, sf wasapi.SampleFormat) (*Stream, error) {
+	dev, err := openEndpoint(cfg.Device)
 	if err != nil {
 		return nil, translateWASAPIError(err, cfg)
 	}

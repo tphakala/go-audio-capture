@@ -92,9 +92,17 @@ func prepareQuery(device string, channels int, format Format) (resolved, error) 
 func openQuery(r resolved) (ratePCM, error) {
 	p, err := openRatePCM(r.card, r.device)
 	if err != nil {
+		// Attribute the failure to the card only once it is shown to be the unit
+		// that was asked for: a busy card that took over the index of an unplugged
+		// one must read as the device being gone, not as busy (retry later).
+		if r.verifyID != "" {
+			if verr := verifyCardIdentity(r); verr != nil {
+				return nil, verr
+			}
+		}
 		return nil, translateQueryError(err)
 	}
-	if err := verifyCardIdentity(r.card, r.device, r.verifyID); err != nil {
+	if err := verifyCardIdentity(r); err != nil {
 		_ = p.Close()
 		return nil, err
 	}

@@ -65,19 +65,14 @@ type Stream struct {
 // requested one, ErrDeviceInUse
 // when another application holds the device (Open fails at once rather than
 // waiting for it to be released), and ErrDeviceGone when the device is missing or
-// was removed.
+// was removed. A caller that already holds a DeviceInfo can use OpenDevice to
+// skip the id resolution.
 func Open(cfg Config) (*Stream, error) {
 	// Cheap, device-independent checks first, so an obviously invalid config is
 	// rejected before a /proc + /sys enumeration resolves the id. SupportedRates
 	// (prepareQuery) orders its checks the same way, so both entry points agree on
 	// which error a caller sees when more than one field is bad.
-	if cfg.Rate <= 0 {
-		return nil, &ConfigError{Field: "rate", Reason: "must be positive"}
-	}
-	if cfg.Channels < 1 {
-		return nil, &ConfigError{Field: "channels", Reason: "must be at least 1"}
-	}
-	format, err := alsaFormat(cfg.Format)
+	format, err := validateStreamConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -85,6 +80,67 @@ func Open(cfg Config) (*Stream, error) {
 	if err != nil {
 		return nil, err
 	}
+	return openResolved(r, cfg, format)
+}
+
+// OpenDevice opens a DeviceInfo that Devices or Resolve returned in this process,
+// without resolving its id again. A caller that has just resolved a device (to
+// show it, or to check that it is present) avoids the second /proc + /sys
+// enumeration that Open performs.
+//
+// It opens d.Card and d.Device, then re-reads the card's identity from sysfs, so
+// a stable d.ID (and d.PortID, when set) must still name that card or OpenDevice
+// fails with ErrDeviceGone and closes it. A DeviceInfo that has gone stale
+// therefore never opens a different unit; call Resolve again and retry. A
+// DeviceInfo with IDStable false names a card index, so its address is opened
+// unverified, as Open does for "hw:N,D". Do not persist a DeviceInfo: its Card is
+// a current-boot index. Persist the ID, or the PortID to pin one of two units
+// with the same serial.
+//
+// A USB ID in the serial form with no PortID (the port could not be derived) is
+// resolved as Open would resolve it: nothing read after the open can tell two
+// units with one serial apart, so it enumerates and reports
+// *AmbiguousDeviceError when more than one matches.
+//
+// Config.Device is ignored; d decides what opens, and Negotiated reports d.ID as
+// the device. Errors are those of Open, plus *ConfigError (field "device") for an
+// empty ID and *BadDeviceError when ID, PortID, Card and Device disagree.
+//
+//nolint:gocritic // hugeParam: OpenDevice runs once per stream, and a value parameter has no nil case and takes a Resolve result or a map element directly.
+func OpenDevice(d DeviceInfo, cfg Config) (*Stream, error) {
+	format, err := validateStreamConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	r, search, err := resolveDeviceInfo(&d)
+	if err != nil {
+		return nil, err
+	}
+	if search {
+		if r, err = resolveForOpen(d.ID); err != nil {
+			return nil, err
+		}
+	}
+	cfg.Device = d.ID
+	return openResolved(r, cfg, format)
+}
+
+// validateStreamConfig runs the device-independent checks shared by Open and
+// OpenDevice and returns the ALSA format for cfg.Format.
+func validateStreamConfig(cfg Config) (uint32, error) {
+	if cfg.Rate <= 0 {
+		return 0, &ConfigError{Field: "rate", Reason: "must be positive"}
+	}
+	if cfg.Channels < 1 {
+		return 0, &ConfigError{Field: "channels", Reason: "must be at least 1"}
+	}
+	return alsaFormat(cfg.Format)
+}
+
+// openResolved opens the card r names, confirms it is still the unit r was
+// resolved from, and negotiates cfg on it. cfg.Device is only recorded in the
+// stream's Negotiated config.
+func openResolved(r resolved, cfg Config, format uint32) (*Stream, error) {
 	periodFrames := cfg.PeriodFrames
 	if periodFrames == 0 {
 		periodFrames = alsa.DefaultPeriodFrames(cfg.Rate) // ~20 ms
@@ -96,6 +152,15 @@ func Open(cfg Config) (*Stream, error) {
 
 	p, err := openPCM(r.card, r.device)
 	if err != nil {
+		// A card that took over the index of the one we resolved can be busy or
+		// absent for reasons that say nothing about our unit. Show the card is
+		// still ours before attributing the failure to it, or a busy stranger reads
+		// as ErrDeviceInUse and the caller retries against it forever.
+		if r.verifyID != "" {
+			if verr := verifyCardIdentity(r); verr != nil {
+				return nil, verr
+			}
+		}
 		// A device that is absent or removed at open time fails here (the PCM
 		// node is missing, or the driver reports the card gone). Classify it the
 		// same way as a mid-stream loss so a caller can retire it with
@@ -107,7 +172,7 @@ func Open(cfg Config) (*Stream, error) {
 	// and opening it, that card could have been unplugged and another one taken
 	// the index. Confirm the card we are now holding is still the one asked for
 	// before any audio is read from it.
-	if err := verifyCardIdentity(r.card, r.device, r.verifyID); err != nil {
+	if err := verifyCardIdentity(r); err != nil {
 		_ = p.Close()
 		return nil, err
 	}

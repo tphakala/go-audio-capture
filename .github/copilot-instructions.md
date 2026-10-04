@@ -18,7 +18,7 @@ Flag as defects:
 Intentional, do not flag:
 
 - `unsafe.Pointer` conversions for ioctl and COM calls (layouts are pinned by tests).
-- Package-level function variables used as test seams (`openPCM`, `openRatePCM`, `openDevice`, `sysOpen`, `sysSetNonblock`, `resumeSleep`).
+- Package-level function variables used as test seams (`openPCM`, `openRatePCM`, `openEndpoint`, `sysOpen`, `sysSetNonblock`, `resumeSleep`).
 - Ignored errors from best-effort cleanup, such as `_ = p.Close()` on an error path.
 - Mutexes that are never held across a blocking syscall; `Close` drains in-flight ioctls instead.
 - Numeric constants in `internal/alsa` and `internal/wasapi` that mirror kernel or Windows headers.
