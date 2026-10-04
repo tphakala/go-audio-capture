@@ -53,8 +53,9 @@ var ErrCapabilitiesUnsupported = errors.New("capture: capability query not suppo
 // missing, which field was not a number, a malformed percent-escape, and so
 // on); BadDeviceError unwraps to it. It matches the other typed errors in this
 // file, each of which carries the detail that produced it (BadRateError has
-// Min/Max, BadFormatError has Rate/Channels/Format, AmbiguousDeviceError has
-// Matches). Err is nil only for a value built without a reason.
+// Min/Max, BadFormatError has Rate/Channels/Format and the accepted channel
+// range, GeometryError has the period geometry and the driver's error,
+// AmbiguousDeviceError has Matches). Err is nil only for a value built without a reason.
 type BadDeviceError struct {
 	Value string
 	Err   error
@@ -162,18 +163,59 @@ func (e *BadRateError) Error() string {
 // was rejected, or 0 when the rejection is rate-independent (e.g. a capability
 // query that found the channel/format unsupported at any rate), in which case
 // Error() omits the rate.
+//
+// MinChannels and MaxChannels are the channel counts the device accepts in
+// Format, taken from the driver's HW_REFINE bounds. They are bounds only: a
+// device that takes 1, 2 or 8 channels reports 1..8, and a count inside the
+// range can still be refused. Both are 0 when the format is unsupported at any
+// channel count, or when the backend cannot tell (Windows); Error() then omits
+// the range.
 type BadFormatError struct {
-	Rate     int
-	Channels int
-	Format   Format
+	Rate        int
+	Channels    int
+	Format      Format
+	MinChannels int
+	MaxChannels int
 }
 
 func (e *BadFormatError) Error() string {
+	var msg string
 	if e.Rate == 0 {
-		return fmt.Sprintf("capture: format %d ch / %s not supported", e.Channels, e.Format)
+		msg = fmt.Sprintf("capture: format %d ch / %s not supported", e.Channels, e.Format)
+	} else {
+		msg = fmt.Sprintf("capture: format %d ch / %s @ %d Hz not supported", e.Channels, e.Format, e.Rate)
 	}
-	return fmt.Sprintf("capture: format %d ch / %s @ %d Hz not supported", e.Channels, e.Format, e.Rate)
+	if e.MaxChannels > 0 {
+		msg += fmt.Sprintf(" (device accepts %d..%d channels in %s)", e.MinChannels, e.MaxChannels, e.Format)
+	}
+	return msg
 }
+
+// GeometryError reports that the device refused every period size and count
+// near the requested ones, at a rate, channel count and format that the device
+// advertised. Rate, PeriodFrames and Periods are the values the commit was
+// attempted with; when no nearby value could be pinned they are the requested
+// ones, except PeriodFrames, which keeps a period size already chosen when only
+// the period count failed. Err is the driver's error (on Linux HW_PARAMS for a refused commit, HW_REFINE
+// when no nearby value could be pinned).
+//
+// Some USB devices only reveal at the commit that they cannot deliver a rate they
+// advertised, and then fail here rather than with *BadRateError. If trying other
+// PeriodFrames and Periods does not help, pick a rate from SupportedRatesVerified,
+// which lists the rates that commit at the default geometry.
+type GeometryError struct {
+	Rate         int
+	PeriodFrames int
+	Periods      int
+	Err          error
+}
+
+func (e *GeometryError) Error() string {
+	return fmt.Sprintf("capture: device refused period geometry at %d Hz (%d frames x %d periods): %v", e.Rate, e.PeriodFrames, e.Periods, e.Err)
+}
+
+// Unwrap returns the driver's error so errors.Is can match its errno.
+func (e *GeometryError) Unwrap() error { return e.Err }
 
 // ConfigError reports an invalid field in a Config passed to Open.
 type ConfigError struct {

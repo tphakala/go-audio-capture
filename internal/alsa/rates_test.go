@@ -29,8 +29,7 @@ func fakeRateDevice(rangeLo, rangeHi uint32, supported map[uint32]bool) ioctlFun
 			}
 			return nil // keep [lo, lo]
 		}
-		setInterval(hw, ParamRate, rangeLo, rangeHi)
-		return nil
+		return narrowInterval(hw, ParamRate, rangeLo, rangeHi)
 	}
 }
 
@@ -90,8 +89,9 @@ func TestSupportedRatesPropagatesRangeRefineError(t *testing.T) {
 func TestSupportedRatesEmptyIntervalIsFatal(t *testing.T) {
 	// Some drivers signal an unsatisfiable channel/format combo by returning
 	// success with the rate interval emptied rather than EINVAL. That must still
-	// surface as EINVAL (which the public layer maps to *BadFormatError), not an
-	// empty, healthy-looking result.
+	// surface as *BadFormatError, not an empty, healthy-looking result. The fake
+	// empties the rate interval on every refine, so the channel-range probe sees
+	// the format as unsupported at any channel count: range 0..0.
 	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
 		if req == iocHwRefine {
 			hw := (*HwParams)(arg)
@@ -101,8 +101,12 @@ func TestSupportedRatesEmptyIntervalIsFatal(t *testing.T) {
 	}
 	p := newPCM(-1, fake)
 	_, _, _, err := p.SupportedRates(1, FormatS16LE, []int{48000})
-	if !errors.Is(err, unix.EINVAL) {
-		t.Fatalf("SupportedRates err = %v, want EINVAL", err)
+	var bfe *BadFormatError
+	if !errors.As(err, &bfe) {
+		t.Fatalf("SupportedRates err = %v, want *BadFormatError", err)
+	}
+	if bfe.MinChannels != 0 || bfe.MaxChannels != 0 {
+		t.Errorf("channel range = %d..%d, want 0..0", bfe.MinChannels, bfe.MaxChannels)
 	}
 }
 
@@ -117,8 +121,7 @@ func TestSupportedRatesProbeErrorIsFatal(t *testing.T) {
 		hw := (*HwParams)(arg)
 		lo, hi := hw.Interval(ParamRate)
 		if lo != hi { // unconstrained range refine succeeds
-			setInterval(hw, ParamRate, 44100, 96000)
-			return nil
+			return narrowInterval(hw, ParamRate, 44100, 96000)
 		}
 		if lo == 96000 { // device disappears when this rate is probed
 			return unix.ENODEV
@@ -129,6 +132,10 @@ func TestSupportedRatesProbeErrorIsFatal(t *testing.T) {
 	_, _, _, err := p.SupportedRates(2, FormatS32LE, []int{44100, 48000, 88200, 96000})
 	if !errors.Is(err, unix.ENODEV) {
 		t.Fatalf("SupportedRates err = %v, want ENODEV", err)
+	}
+	// The probe error names the ioctl, like every other HW_REFINE failure.
+	if ie, ok := errors.AsType[*ioctlError](err); !ok || ie.Op != "HW_REFINE" {
+		t.Fatalf("SupportedRates err = %v, want an ioctlError naming HW_REFINE", err)
 	}
 }
 
@@ -154,19 +161,21 @@ func TestSupportedRatesEmptyWhenNoneMatch(t *testing.T) {
 // 384000] but delivering only 384000) that refine-only probing cannot detect.
 func fakeCommitDevice(rangeLo, rangeHi uint32, committable map[uint32]bool) ioctlFunc {
 	return func(_ int, req uintptr, arg unsafe.Pointer) error {
-		hw := (*HwParams)(arg)
 		switch req {
 		case iocHwRefine:
-			// A refine reports the advertised rate window when rate is open, and
-			// keeps a pinned rate (a refine narrows, never widens, a pin). It also
-			// resolves a valid period/buffer geometry the caller can pin to.
-			if lo, hi := hw.Interval(ParamRate); lo != hi {
-				setInterval(hw, ParamRate, rangeLo, rangeHi)
+			hw := (*HwParams)(arg)
+			// A refine narrows the rate to the advertised window (a pinned rate stays
+			// pinned: a refine never widens) and gives period size and count a valid
+			// range the caller can pin to.
+			if err := narrowInterval(hw, ParamRate, rangeLo, rangeHi); err != nil {
+				return err
 			}
-			setInterval(hw, ParamPeriodSize, 64, 8192)
-			setInterval(hw, ParamPeriods, 2, 32)
-			return nil
+			if err := narrowInterval(hw, ParamPeriodSize, 64, 8192); err != nil {
+				return err
+			}
+			return narrowInterval(hw, ParamPeriods, 2, 32)
 		case iocHwParams:
+			hw := (*HwParams)(arg)
 			lo, hi := hw.Interval(ParamRate)
 			if lo != hi { // a commit must pin an exact rate
 				return unix.EINVAL
@@ -209,11 +218,9 @@ func TestVerifyRatePropagatesRealError(t *testing.T) {
 	// than being read as "unsupported".
 	sentinel := unix.ENODEV
 	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
-		hw := (*HwParams)(arg)
 		switch req {
 		case iocHwRefine:
-			setInterval(hw, ParamRate, 48000, 384000)
-			return nil
+			return narrowDevice(arg, 48000, 384000)
 		case iocHwParams:
 			return sentinel
 		default:
@@ -233,12 +240,7 @@ func TestVerifyRateRejectsSilentSubstitution(t *testing.T) {
 		hw := (*HwParams)(arg)
 		switch req {
 		case iocHwRefine:
-			if lo, hi := hw.Interval(ParamRate); lo != hi {
-				setInterval(hw, ParamRate, 44100, 48000)
-			}
-			setInterval(hw, ParamPeriodSize, 64, 8192)
-			setInterval(hw, ParamPeriods, 2, 32)
-			return nil
+			return narrowDevice(arg, 44100, 48000)
 		case iocHwParams:
 			// Commit succeeds but the hardware forces 44100 regardless of request.
 			setInterval(hw, ParamRate, 44100, 44100)
@@ -263,16 +265,18 @@ func TestVerifyRateRejectsSilentSubstitution(t *testing.T) {
 // verifying with the real streaming open's geometry.
 func fakeGeometryDevice(rangeLo, rangeHi, minAdvertised, minCommittable uint32) ioctlFunc {
 	return func(_ int, req uintptr, arg unsafe.Pointer) error {
-		hw := (*HwParams)(arg)
 		switch req {
 		case iocHwRefine:
-			if lo, hi := hw.Interval(ParamRate); lo != hi {
-				setInterval(hw, ParamRate, rangeLo, rangeHi)
+			hw := (*HwParams)(arg)
+			if err := narrowInterval(hw, ParamRate, rangeLo, rangeHi); err != nil {
+				return err
 			}
-			setInterval(hw, ParamPeriodSize, minAdvertised, 8192)
-			setInterval(hw, ParamPeriods, 2, 1024)
-			return nil
+			if err := narrowInterval(hw, ParamPeriodSize, minAdvertised, 8192); err != nil {
+				return err
+			}
+			return narrowInterval(hw, ParamPeriods, 2, 1024)
 		case iocHwParams:
+			hw := (*HwParams)(arg)
 			if lo, hi := hw.Interval(ParamRate); lo != hi {
 				return unix.EINVAL // a commit must pin an exact rate
 			}

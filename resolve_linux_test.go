@@ -489,17 +489,16 @@ func TestSupportedRatesResolvesStableID(t *testing.T) {
 	}
 }
 
-// TestSupportedRatesVerifiedResolvesOnce pins the fix for a second race: the
-// refine pass and the verify pass must run against ONE resolution, or a device
-// swapped between them would be refined as one unit and verified as another.
+// TestSupportedRatesVerifiedResolvesOnce pins that the refine pass and the verify
+// pass run against ONE resolution (and one open), or a device swapped between
+// them would be refined as one unit and verified as another.
 //
 // A static fixture cannot catch a per-pass resolver, since re-enumerating yields
-// the same index. So after the first open, the fixture changes so the target
-// serial ALSO appears at a second index: any resolution done after that point
-// finds two matches and fails as ambiguous, while the single shared resolution
-// (taken before any open) never re-enumerates and is unaffected. Every open
-// therefore still targets the originally resolved card 2, and the query still
-// succeeds.
+// the same index. So at the open, the fixture changes so the target serial ALSO
+// appears at a second index: any resolution done after that point finds two
+// matches and fails as ambiguous, while the single resolution (taken before the
+// open) never re-enumerates and is unaffected. The one open still targets the
+// originally resolved card 2, and the query still succeeds.
 func TestSupportedRatesVerifiedResolvesOnce(t *testing.T) {
 	proc, sys := buildFixture(t, hostLayout())
 	setRoots(t, proc, sys)
@@ -519,8 +518,8 @@ func TestSupportedRatesVerifiedResolvesOnce(t *testing.T) {
 		opens++
 		cards[card]++
 		if opens == 1 {
-			// The single resolution has already happened and the refine pass has
-			// opened against it; introduce the ambiguity only now.
+			// The single resolution has already happened and this open uses it;
+			// introduce the ambiguity only now.
 			procRoot, sysRoot = dupProc, dupSys
 		}
 		return &fakeRatePCM{
@@ -536,13 +535,13 @@ func TestSupportedRatesVerifiedResolvesOnce(t *testing.T) {
 	if len(rs.Rates) != 2 {
 		t.Errorf("Rates = %v, want both verified", rs.Rates)
 	}
-	// One refine open plus one per candidate rate, every one against the
-	// originally resolved card 2.
-	if opens != 3 {
-		t.Errorf("opened %d times, want 3", opens)
+	// One open serves the refine pass and every candidate, against the originally
+	// resolved card 2.
+	if opens != 1 {
+		t.Errorf("opened %d times, want 1", opens)
 	}
-	if cards[2] != 3 {
-		t.Errorf("opens per card = %v, want all three on card 2", cards)
+	if cards[2] != 1 {
+		t.Errorf("opens per card = %v, want the one open on card 2", cards)
 	}
 }
 

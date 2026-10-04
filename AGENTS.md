@@ -56,7 +56,8 @@ This is the robustness contract. A change to any row is a behaviour change and n
 | Stable id matches no present device | `*DeviceNotFoundError` (unwraps to `ErrDeviceGone`) | `ErrDeviceGone` | wait for the device to reappear, then reopen |
 | Two units report the same serial | `*AmbiguousDeviceError` | n/a | pin one with a listed id |
 | Rate not supported | `*BadRateError` (with the supported range) | `*BadRateError` | pick a supported rate (`SupportedRates`) |
-| Channel/format combination not supported | `*BadFormatError` | `*BadFormatError` | pick another format or channel count |
+| Channel/format combination not supported | `*BadFormatError` (with the accepted channel range) | `*BadFormatError` (no range) | pick another format or channel count |
+| Period geometry refused (every refine passed, `HW_PARAMS` refused, or no value near the requested period is attainable) | `*GeometryError` | n/a | pass other `PeriodFrames`/`Periods`, or another rate/format; `SupportedRatesVerified` lists the rates that commit at the default geometry |
 | Device held by another application | `ErrDeviceInUse` at once from `Open` and `SupportedRates*` | `ErrDeviceInUse` | retry later with backoff |
 | Exclusive access disabled for the endpoint | n/a | `ErrExclusiveNotAllowed` | user changes the endpoint setting |
 | Overrun (consumer too slow) | recovered inside `Read`, counted in `Xruns()` | counted in `Xruns()` | nothing; watch the counter |
@@ -92,7 +93,7 @@ internal/alsa/        Kernel ABI: hwparams/swparams structs, ioctl numbers, PCM 
 internal/wasapi/      COM vtables (com.go), enumeration, IAudioClient setup and format
                       negotiation (client.go, format.go), HRESULT mapping (errors.go)
 
-cmd/gac-rec/          Debug recorder for hardware validation (-list, -d, -r, -c, -f, -t, -o)
+cmd/gac-rec/          Debug recorder for hardware validation (-list, -d, -r, -c, -f, -t, -o, -p, -n, -rates)
 rules/rules.go        gocritic ruleguard matchers (build tag `ruleguard`, lint-only)
 testdata/proc_asound/ Committed /proc/asound fixtures
 ```
@@ -108,12 +109,17 @@ These explain code that otherwise looks odd. Check against `sound/core/pcm_nativ
 - A read timeout (`EIO`) leaves the stream running, so stall recovery issues `DROP` before `PREPARE` and `START`.
 - A reader parked in `READI_FRAMES` is woken with `EBADFD` when the PCM is disconnected; after the card disconnects every ioctl on the fd returns `ENODEV`. One `PVERSION` probe tells an unplug from an ordinary state error. `Close`'s own `DROP` also wakes a parked reader with `EBADFD`, which is why `s.closed` is checked first.
 - The capture stop threshold is the buffer size, so an overrun stops the stream with `EPIPE` and is counted, instead of the hardware silently overwriting unread audio.
+- `HW_REFINE` clears `rmask` at its end and applies constraints only to the parameters whose bit is set, so `refineAll` sets `Rmask` before every refine after the first; otherwise the kernel accepts an invalid pin unchecked. `HW_PARAMS` sets `rmask` itself.
+- Interval bounds do not encode step rules (HDA: period bytes a multiple of 128), so a value inside the bounds can still be refused. `refineNear` asks the kernel for the nearest attainable period size and count, then pins and re-refines, instead of clamping into the bounds.
+- `HW_PARAMS` resolves whatever is left open toward the smallest period time, never toward our target, so the period size and count are pinned before the commit. A failed `HW_PARAMS` resets the stream to OPEN and runs the driver's `hw_free`.
+- `HW_FREE` is accepted only in SETUP and PREPARED (`EBADFD` from OPEN) and returns the stream to OPEN. `VerifyRate` issues it after each successful commit so `SupportedRatesVerified` can probe every rate on one fd; the USB driver otherwise keeps the committed endpoint, which can limit the next rate refine.
+- A non-integer interval can come back from a refine with `openmin`/`openmax` set, where `Min`/`Max` are excluded values; `refineNear` steps over them.
 
 ## Testing approach
 
 Tests run without audio hardware. Each layer has an injection seam:
 
-- `internal/alsa`: `PCM` holds an `ioctlFunc`; tests construct it with `newPCM(fd, fake)`. `fakeKernel` in `lifecycle_test.go` models the PCM state machine so a test cannot claim a recovery the kernel would refuse; `fakeRateDevice` and `fakeCommitDevice` (`rates_test.go`) cover negotiation. `sysOpen`, `sysSetNonblock` and `resumeSleep` are package seams for the open flags and the RESUME retry wait.
+- `internal/alsa`: `PCM` holds an `ioctlFunc`; tests construct it with `newPCM(fd, fake)`. `fakeKernel` in `lifecycle_test.go` models the PCM state machine so a test cannot claim a recovery the kernel would refuse; `fakeRateDevice` and `fakeCommitDevice` (`rates_test.go`) cover negotiation; `fakeStepDevice` (`geometry_test.go`) models narrowing refines, `rmask`, a period-bytes step rule, a buffer cap and a channel range, and `fakeStatefulRateDevice` models OPEN/SETUP with `HW_FREE`. Fakes must narrow intervals the way the kernel does (`narrowInterval`); a fake that overwrites a pinned interval would let a wrong pin pass. `sysOpen`, `sysSetNonblock` and `resumeSleep` are package seams for the open flags and the RESUME retry wait.
 - Root package, Linux: package-level function vars `openPCM` (stream) and `openRatePCM` (capabilities) are swapped for fakes (`fakePCM` in `stream_linux_test.go`; lifecycle and recovery-budget cases in `stream_lifecycle_linux_test.go`).
 - Device identity: `devicesFrom(procDir, sysDir)` takes roots; `deviceid_fixture_linux_test.go` builds throwaway `/proc/asound` and `/sys` trees with symlinks under `t.TempDir()` (sysfs symlinks cannot be committed).
 - Windows: `openDevice` var in `stream_windows.go`; WASAPI fill and format logic are tested directly.

@@ -197,6 +197,10 @@ type RateSupport struct {
 // Periods default to a 20 ms period (Rate/50) and 4 periods when left zero on
 // Linux; on Windows (WASAPI exclusive mode) the endpoint dictates the buffer
 // period, so both fields are ignored and Negotiated reports the actual period.
+// On Linux they are targets: the device may adjust them to the nearest values it
+// accepts (some drivers need the period in whole multiples of a block size),
+// Negotiated reports what it granted, and Open fails with *GeometryError when
+// nothing near them works.
 type Config struct {
 	// Device names the capture device. On Linux it accepts a DeviceInfo.ID in
 	// any of its stable forms ("usb:...", "hw:CARD=name,DEV=0"), which is what a
@@ -206,7 +210,7 @@ type Config struct {
 	// and replugs. On Windows it is the WASAPI endpoint id, or ""/"default".
 	Device       string
 	Rate         int // requested sample rate in Hz
-	Channels     int // 1 or 2
+	Channels     int // channel count the device captures; never up- or down-mixed
 	Format       Format
 	PeriodFrames int // frames per period; Linux: 0 => Rate/50 (20 ms); ignored on Windows
 	Periods      int // periods per buffer; Linux: 0 => 4; ignored on Windows

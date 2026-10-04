@@ -46,6 +46,7 @@ const (
 	wantIocPVersion = 0x80044100
 	wantIocHwRefine = 0xc2604110
 	wantIocHwParams = 0xc2604111
+	wantIocHwFree   = 0x4112
 	wantIocSwParams = 0xc0884113
 	wantIocPrepare  = 0x4140
 	wantIocStart    = 0x4142
