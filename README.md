@@ -9,13 +9,20 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Sponsor](https://img.shields.io/github/sponsors/tphakala?logo=githubsponsors&color=ea4aaa&label=Sponsor)](https://github.com/sponsors/tphakala)
 
-Pure Go, cgo-free audio capture for Linux, Windows, and macOS.
+Pure Go, cgo-free audio capture for Go applications on Linux and Windows (macOS planned).
 
-Capture only: device enumeration, honest format negotiation, and PCM delivery through a blocking pull API. Planned replacement for the malgo/miniaudio capture path in BirdNET-Go.
+Capture only: device enumeration, exact format negotiation, and PCM delivery through a blocking pull API. Resampling, conversion and other post-processing belong in separate libraries.
+
+## Goals
+
+- **No cgo.** Builds with `CGO_ENABLED=0` into a static binary: no libasound, no C toolchain, no audio library to install on the target. Cross-compiling for a Raspberry Pi is a plain `GOOS=linux GOARCH=arm64 go build`.
+- **Exactly what the hardware captures.** The requested rate, channel count and sample format are negotiated with the device as is, or `Open` fails with a typed error. Nothing is resampled, mixed or converted behind the caller's back, so ultrasonic and high-rate captures arrive intact.
+- **Robust by default.** Capture services often run unattended for long periods. Overruns, system suspend and driver stalls are recovered inside `Read` and counted; a busy, missing or unplugged device comes back as a specific error (`ErrDeviceInUse`, `ErrDeviceGone`, `ErrDeviceStalled`) that tells the caller whether to retry, wait for the device, or reopen. No opaque errno strings, and `Close` always unblocks a parked `Read`. See [Failure handling](#failure-handling).
+- **Wide hardware range.** From low-cost USB sound cards and USB microphones to studio audio interfaces, and special hardware such as the 384 kHz AudioMoth ultrasonic recorder. Device ids are stable across reboots and replugs, so a configured device keeps meaning the same physical hardware.
 
 ## Why
 
-miniaudio has served well, but the cgo boundary keeps costing debugging time: ALSA's dsnoop plugin silently resampling 256 kHz captures down to 48 kHz content, opaque "miniaudio: Invalid argument" failures in containers, hex-encoded device IDs, and negotiated formats only visible through a fork patch. Native Go backends make negotiation, buffering, and errors fully visible and debuggable.
+General-purpose audio libraries reach the hardware through userspace layers and cgo, and both get in the way of capture work: ALSA's `dsnoop` plugin silently resamples a 256 kHz capture down to 48 kHz content, errors surface as an opaque "Invalid argument" inside containers, device ids are hex blobs that change with probe order, and the format actually negotiated is hidden. Talking to the kernel (ALSA) and to WASAPI directly from Go makes negotiation, buffering and every failure visible and debuggable.
 
 ## Scope
 
@@ -76,7 +83,7 @@ for {
 }
 ```
 
-`Read` is single-consumer and blocking; `Close` may be called from another goroutine to unblock it. Overruns, resumes after a system suspend and restarted stalls are recovered internally and counted via `Stream.Xruns()`. On Linux recovery is bounded per `Read` call: a repeated stall, or a ninth recoverable failure (overrun, suspend or stall) after 8 recoveries without any frames delivered, returns a `*StallError` (`errors.Is(err, capture.ErrDeviceStalled)`), after which the stream must be closed and reopened. On Linux a device unplugged while `Read` is parked returns `capture.ErrDeviceGone`. On Linux `Open` on a device held by another application fails at once with `capture.ErrDeviceInUse` instead of waiting for it.
+`Read` is single-consumer and blocking; `Close` may be called from another goroutine to unblock it. Overruns, resumes after a system suspend and restarted stalls are recovered internally and counted via `Stream.Xruns()`. On Linux recovery is bounded per `Read` call: a repeated stall, or a ninth recoverable failure (overrun, suspend or stall) after 8 recoveries without any frames delivered, returns a `*StallError` (`errors.Is(err, capture.ErrDeviceStalled)`), after which the stream must be closed and reopened. On Linux a device unplugged while `Read` is parked returns `capture.ErrDeviceGone`. On Linux `Open` on a device held by another application fails at once with `capture.ErrDeviceInUse` instead of waiting for it. The full list is under [Failure handling](#failure-handling).
 
 ### Device ids are stable
 
@@ -139,7 +146,7 @@ go run ./cmd/gac-rec -d 'usb:16d0:06f3:s=0384_2474750763FA81C9:if=0,0' -r 256000
 go run ./cmd/gac-rec -d hw:1,0 -r 256000 -c 1 -f s16 -t 10s -o out.wav   # the unstable address still works
 ```
 
-Validated against the `snd-aloop` loopback (the same kernel ioctl path as a physical card) at 48/192/384 kHz S16 and 48 kHz S32, FFT-verified: a 60 kHz tone at 384 kHz round-trips with all spectral energy above 24 kHz and zero xruns, the exact ultrasonic case dsnoop broke. Field validation on real arm64 hardware with an ultrasonic USB mic has not been done yet.
+Validated against the `snd-aloop` loopback (the same kernel ioctl path as a physical card) at 48/192/384 kHz S16 and 48 kHz S32, FFT-verified: a 60 kHz tone at 384 kHz round-trips with all spectral energy above 24 kHz and zero xruns, the exact ultrasonic case dsnoop broke. On real hardware it has captured from a 384 kHz AudioMoth, a ZOOM AMS-24 and a Focusrite Scarlett Solo 4th Gen, on amd64 and on arm64 (Raspberry Pi 4), including unplug, busy-device and forced-overrun tests.
 
 Architectures: the Linux backend supports the little-endian LP64 arches (`amd64`, `arm64`, `riscv64`, `loong64`) and little-endian ILP32 arches (`386`, `arm`), all of which use the generic `asm-generic/ioctl.h` encoding. `amd64`, `arm64`, `386`, and `arm` are additionally hardware-validated; `riscv64` and `loong64` build on the identical, C-verified LP64 layout and ioctl numbers. The kernel's `snd_pcm_uframes_t` is a C `unsigned long`, so the ioctl struct layouts and the size-encoded ioctl numbers differ between 64- and 32-bit builds; both sets are pinned against `sound/asound.h` (the 32-bit set C-verified with `gcc -m32`) and asserted in the layout tests, with the ILP32 assertions run under `GOARCH=386`. A 32-bit binary was validated capturing from real USB hardware (a 384 kHz AudioMoth mic and a ZOOM AMS-24) through the kernel's 32-bit compat path, negotiating byte-for-byte identically to the 64-bit build. Any other `GOARCH` fails to build rather than silently emitting wrong ioctl numbers: big-endian targets (their `snd_interval` flag bit-packing is little-endian only) and the PowerPC and MIPS families including the little-endian `ppc64le`/`mips64le` (they use an architecture-specific ioctl encoding, so supporting them needs a per-arch ioctl encoder, not just this layout).
 
@@ -176,11 +183,32 @@ go run ./cmd/gac-rec -d "default" -r 48000 -c 2 -f s16 -t 10s -o out.wav
 
 Validated on real hardware, a Sound Blaster ZxR (48 kHz) and a Solid State Logic SSL 2 MkII (48 and 192 kHz): captured audio duration matches wall-clock (real-time), zero xruns, gap-free including at 192 kHz, with `*BadRateError`/`*BadFormatError` confirmed on unsupported rates and channel layouts.
 
+## Failure handling
+
+What a caller sees for each failure, and what to do about it. Anything `Read` returns as an error leaves the stream unusable: `Close` it, and open a new one when appropriate.
+
+| Condition | Error | What to do |
+|---|---|---|
+| Rate not supported | `*BadRateError` (carries the supported range) | pick a supported rate; `SupportedRates` lists them on Linux |
+| Channel count or sample format not supported | `*BadFormatError` | pick another layout |
+| Device held by another application | `ErrDeviceInUse`, returned at once | retry later with a backoff |
+| Exclusive access disabled for the endpoint (Windows) | `ErrExclusiveNotAllowed` | the user changes the endpoint setting |
+| Configured device not attached | `ErrDeviceGone` (`*DeviceNotFoundError` for a stable id on Linux) | wait for it to reappear (`Resolve`), then open |
+| Two identical units with one serial (Linux) | `*AmbiguousDeviceError` | configure one of the listed ids |
+| Overrun, consumer too slow | none: recovered and counted in `Xruns()` | watch the counter |
+| System suspend and resume (Linux) | none: recovered and counted | nothing |
+| Driver stops delivering audio (Linux) | one restart, counted; if it happens again, `*StallError` (`ErrDeviceStalled`) | close and reopen |
+| Recovery keeps failing with no audio (Linux) | `*StallError` (`ErrDeviceStalled`) | close and reopen |
+| Device unplugged during capture | `ErrDeviceGone` | close, wait for the device to reappear |
+| `Close` called from another goroutine | `ErrClosed` | stop reading |
+
+Platform gaps: Windows does not detect a stalled driver yet, and a Windows `Read` parked while the endpoint is unplugged is not woken until `Close`.
+
 ## Performance vs malgo/miniaudio
 
 This library exists for debuggability and a clean cgo-free build, not for raw speed, and a direct measurement bears that out: at typical capture rates the CPU cost is the same, and the measurable wins are memory and process footprint.
 
-Both paths captured from the same USB interface at its native 48 kHz / 2 ch / S32LE, so neither side resampled or converted. The malgo path was configured the way BirdNET-Go drives it (miniaudio defaults, `Alsa.NoMMap=1`, device selected by id). Each figure is the mean of three 60 s steady-state windows (3 s warmup discarded), self-measured with `getrusage(RUSAGE_SELF)` (which aggregates miniaudio's own capture thread), Go `runtime.MemStats`, and `/proc/self/status`. The native binary was built `CGO_ENABLED=0`.
+Both paths captured from the same USB interface at its native 48 kHz / 2 ch / S32LE, so neither side resampled or converted. The malgo path used miniaudio defaults with `Alsa.NoMMap=1` and the device selected by id, a typical cgo capture setup. Each figure is the mean of three 60 s steady-state windows (3 s warmup discarded), self-measured with `getrusage(RUSAGE_SELF)` (which aggregates miniaudio's own capture thread), Go `runtime.MemStats`, and `/proc/self/status`. The native binary was built `CGO_ENABLED=0`.
 
 | Metric (48 kHz stereo S32, 60 s window) | this library (pure Go) | malgo / miniaudio (cgo) |
 |---|---|---|

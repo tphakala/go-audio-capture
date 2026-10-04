@@ -1,5 +1,7 @@
 // Package capture is a pure-Go, cgo-free audio capture library for Linux and
-// Windows (a macOS backend is planned).
+// Windows (a macOS backend is planned). It is capture-only and aims to work
+// with the whole range of capture hardware, from low-cost USB sound cards to
+// studio interfaces and ultrasonic recorders.
 //
 // On Linux it talks directly to the ALSA PCM character devices under /dev/snd
 // via kernel ioctls, with no dependency on libasound. This gives hw:-level
@@ -26,6 +28,13 @@
 //     When no stable form can be derived IDStable is false and ID is only a
 //     current-boot address that must not be persisted. Resolve reports what an
 //     id currently names without opening it.
+//   - Robust failure handling for unattended capture. Overruns, system suspend
+//     and driver stalls are recovered inside Stream.Read and counted by
+//     Stream.Xruns; a busy, missing, unplugged or stalled device is reported as
+//     ErrDeviceInUse, ErrDeviceGone or ErrDeviceStalled so the caller knows
+//     whether to retry, wait for the device or reopen. Open fails at once on a
+//     busy device, and Close always unblocks a parked Read. Stall detection and
+//     waking a parked Read on unplug are Linux-only so far.
 //
 // SupportedRates queries which sample rates a device accepts for a given
 // channel count and format, using the ALSA HW_REFINE ioctl only (no state
