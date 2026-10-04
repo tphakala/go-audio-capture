@@ -394,3 +394,21 @@ func TestBadStateErrorOnClosedStreamSkipsProbe(t *testing.T) {
 		t.Errorf("probes = %d, want 0", fp.probes)
 	}
 }
+
+// TestOpenNegotiateEBADFDPresentDevice pins the other half of the Open probe: an
+// EBADFD from Negotiate on a device that still answers PVERSION is a plain state
+// error and must not be relabelled ErrDeviceGone.
+func TestOpenNegotiateEBADFDPresentDevice(t *testing.T) {
+	fp := &fakePCM{negErr: &recoverError{unix.EBADFD}}
+	defer swapOpenPCM(fp)()
+	_, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS16LE})
+	if !errors.Is(err, unix.EBADFD) || errors.Is(err, ErrDeviceGone) {
+		t.Errorf("Open = %v, want the original EBADFD, not ErrDeviceGone", err)
+	}
+	if fp.probes != 1 {
+		t.Errorf("probes = %d, want 1", fp.probes)
+	}
+	if fp.closeCalls != 1 {
+		t.Errorf("Close calls = %d, want 1", fp.closeCalls)
+	}
+}
