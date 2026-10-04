@@ -91,6 +91,8 @@ type fakePCM struct {
 	recovered  int
 	block      chan struct{} // closed by Close to unblock a parked ReadI
 	closeCalls int
+	probeFn    func() error // result of Probe when set; nil means the device answers
+	probes     int
 }
 
 func (f *fakePCM) Negotiate(rate, channels int, format uint32, periodFrames, periods int) (alsa.Negotiated, error) {
@@ -113,6 +115,13 @@ func (f *fakePCM) Recover(err error) error {
 		return nil
 	}
 	return err
+}
+func (f *fakePCM) Probe() error {
+	f.probes++
+	if f.probeFn != nil {
+		return f.probeFn()
+	}
+	return nil
 }
 func (f *fakePCM) Close() error {
 	f.closeCalls++
@@ -443,10 +452,12 @@ func TestReadMapsDeviceGoneToErrDeviceGone(t *testing.T) {
 }
 
 // TestReadPassesThroughNonDeviceGoneError guards the other half of
-// translateReadError's contract: an unrecoverable errno that is NOT a
+// terminalError's contract: an unrecoverable errno that is NOT a
 // device-gone code (EIO is a genuine read fault on a device still present) must
 // surface unchanged, never relabelled ErrDeviceGone. Without this, widening the
-// mapping (a stray default: return ErrDeviceGone) would slip through green.
+// mapping (a stray default: return ErrDeviceGone) would slip through green. Here
+// EIO is a failed recovery (the fake Recover returns it unchanged), not a first
+// stall, which Recover would restart.
 func TestReadPassesThroughNonDeviceGoneError(t *testing.T) {
 	fp := &fakePCM{readFn: func() (int, error) { return 0, &recoverError{unix.EIO} }}
 	defer swapOpenPCM(fp)()
@@ -672,25 +683,6 @@ func TestStartPassesThroughOtherError(t *testing.T) {
 	}
 	if !errors.Is(err, unix.EIO) {
 		t.Errorf("Start with EIO = %v, want it to unwrap to EIO", err)
-	}
-}
-
-// TestIsDeviceGoneErrno pins the shared errno set directly: the three device-gone
-// codes match (bare and wrapped), and a present-device fault (EIO) does not.
-func TestIsDeviceGoneErrno(t *testing.T) {
-	for _, errno := range []unix.Errno{unix.ENODEV, unix.ENXIO, unix.ENOENT} {
-		if !isDeviceGoneErrno(errno) {
-			t.Errorf("isDeviceGoneErrno(%v) = false, want true", errno)
-		}
-		if !isDeviceGoneErrno(&recoverError{errno}) {
-			t.Errorf("isDeviceGoneErrno(wrapped %v) = false, want true", errno)
-		}
-	}
-	if isDeviceGoneErrno(unix.EIO) {
-		t.Error("isDeviceGoneErrno(EIO) = true, want false")
-	}
-	if isDeviceGoneErrno(nil) {
-		t.Error("isDeviceGoneErrno(nil) = true, want false")
 	}
 }
 

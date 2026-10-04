@@ -19,8 +19,19 @@ type pcm interface {
 	Start() error
 	ReadI(buf []byte, frames int) (int, error)
 	Recover(err error) error
+	Probe() error
 	Close() error
 }
+
+// Recovery budgets for one Read call. Read returns as soon as frames arrive, so
+// these count recoveries within one gap in the data and a stream with periodic
+// xruns between good reads never reaches them. Real sequences inside one gap are
+// 2-3 recoveries long, so 8 leaves margin. One stall restart is tried; a second
+// EIO in the same gap means the restart did not help and the caller must reopen.
+const (
+	maxRecoveriesWithoutData = 8
+	maxStallRestarts         = 1
+)
 
 var openPCM = func(card, device int) (pcm, error) {
 	p, err := alsa.OpenPCM(card, device)
@@ -48,8 +59,9 @@ type Stream struct {
 // a well-formed stable id matches no present device, *AmbiguousDeviceError when
 // it matches more than one, *BadRateError for an unsupported rate,
 // *BadFormatError for an unsupported channel/format combination, ErrDeviceInUse
-// when another application holds the device, and ErrDeviceGone when the device is
-// missing or was removed.
+// when another application holds the device (Open fails at once rather than
+// waiting for it to be released), and ErrDeviceGone when the device is missing or
+// was removed.
 func Open(cfg Config) (*Stream, error) {
 	// Cheap, device-independent checks first, so an obviously invalid config is
 	// rejected before a /proc + /sys enumeration resolves the id. SupportedRates
@@ -97,6 +109,12 @@ func Open(cfg Config) (*Stream, error) {
 	}
 	n, err := p.Negotiate(cfg.Rate, cfg.Channels, format, periodFrames, periods)
 	if err != nil {
+		// EBADFD from a negotiate ioctl means the PCM left the state the call
+		// needs; probe before closing to tell a device that vanished mid-open
+		// from any other cause.
+		if errors.Is(err, unix.EBADFD) && deviceDisconnected(p) {
+			err = ErrDeviceGone
+		}
 		_ = p.Close()
 		return nil, translateOpenError(err, cfg.Channels, cfg.Format)
 	}
@@ -124,30 +142,27 @@ func (s *Stream) Start() error {
 		return ErrClosed
 	}
 	if err := s.pcm.Start(); err != nil {
-		// A concurrent Close races the START ioctl to EBADF; report the close.
-		if s.closed.Load() || errors.Is(err, unix.EBADF) {
-			return ErrClosed
-		}
-		// A device unplugged in the window between Open and Start surfaces as
-		// ErrDeviceGone so a caller can classify a lost device with errors.Is at
-		// Start exactly as it can at Open and Read.
-		if isDeviceGoneErrno(err) {
-			return ErrDeviceGone
-		}
-		return err
+		// A device unplugged between Open and Start surfaces as ErrDeviceGone
+		// (ENODEV, or EBADFD confirmed by the probe), as it does at Open and Read.
+		return s.terminalError(err)
 	}
 	return nil
 }
 
 // Read fills buf with whole interleaved frames and returns the number of frames
-// read. It blocks until at least one period is available. An overrun (xrun) is
-// recovered internally (the counter is bumped and the read retried). Read
+// read. It blocks until at least one period is available. Recoverable failures
+// are handled internally and counted (see Xruns): an overrun is restarted, a
+// system suspend is resumed, and a stalled stream (EIO, the kernel's read
+// timeout) gets one restart. Recovery is bounded per call: a second stall, or
+// more than a handful of recoveries without any frames being delivered, returns
+// a *StallError (which unwraps to ErrDeviceStalled and to the last errno). Read
 // returns ErrClosed when the stream is closed and ErrDeviceGone when the device
-// disappears (e.g. a USB capture device unplugged mid-stream); any other
-// unrecoverable error is returned unchanged. Any returned error leaves the
-// stream unusable (a short read, fewer frames than requested, is not an error and
-// returns a nil error): the caller must Close it (Read does not release the
-// device fd on its own) and, to resume, Open a new stream.
+// disappears (e.g. a USB capture device unplugged mid-stream, including while
+// Read is parked in the driver); any other unrecoverable error is returned
+// unchanged. Any returned error leaves the stream unusable (a short read, fewer
+// frames than requested, is not an error and returns a nil error): the caller
+// must Close it (Read does not release the device fd on its own) and, to resume,
+// Open a new stream.
 func (s *Stream) Read(buf []byte) (int, error) {
 	if s.closed.Load() {
 		return 0, ErrClosed
@@ -156,35 +171,72 @@ func (s *Stream) Read(buf []byte) (int, error) {
 	if frames == 0 {
 		return 0, nil
 	}
+	var recoveries, stalls int
 	for {
 		n, err := s.pcm.ReadI(buf, frames)
 		if err == nil {
 			return n, nil
 		}
-		// A concurrent Close surfaces two distinct errnos: EBADF when acquire
-		// short-circuits a closed PCM, or the kernel's EBADFD (a different errno)
-		// when Close's DROP moved the stream to SETUP under a parked read. Close
-		// sets s.closed before pcm.Close, so the s.closed check catches the
-		// EBADFD case that errors.Is(EBADF) does not.
-		if s.closed.Load() || errors.Is(err, unix.EBADF) {
-			return 0, ErrClosed
+		// Only errnos Recover can act on count against the budget; anything
+		// else (a Close, an unplug, a state error) is classified at once.
+		if s.closed.Load() || !alsa.IsRecoverable(err) {
+			return 0, s.terminalError(err)
 		}
+		stall := errors.Is(err, unix.EIO)
+		if recoveries == maxRecoveriesWithoutData || (stall && stalls == maxStallRestarts) {
+			return 0, &StallError{Recoveries: recoveries, Err: err}
+		}
+		if stall {
+			stalls++
+		}
+		recoveries++
 		if rerr := s.pcm.Recover(err); rerr != nil {
-			// A concurrent Close can fail Recover's own ioctls with EBADF;
-			// surface that as a clean close rather than a raw driver error.
-			if s.closed.Load() || errors.Is(rerr, unix.EBADF) {
-				return 0, ErrClosed
-			}
-			// Unrecoverable: Recover returns the error unchanged. Map a
-			// disappeared device onto ErrDeviceGone so a caller can classify a
-			// surprise unplug with errors.Is instead of matching bare errnos.
-			return 0, translateReadError(rerr)
+			// A recovery ioctl failed: a concurrent Close fails it with EBADF,
+			// an unplug with ENODEV or EBADFD, which terminalError classifies.
+			return 0, s.terminalError(rerr)
 		}
 		s.xruns.Add(1)
 	}
 }
 
-// Xruns returns the number of buffer overruns recovered so far.
+// terminalError maps an error that ends Start or Read onto the public errors.
+// A Close always wins: Close sets s.closed before pcm.Close, which covers the
+// EBADFD that Close's DROP gives a parked read, and EBADF is a closed PCM
+// refusing the ioctl. Any other EBADFD is either an unplug (the kernel wakes a
+// parked reader with it once the PCM is DISCONNECTED) or an ordinary state
+// error, so one PVERSION probe decides; s.closed is checked again after it
+// because a Close racing the probe fails it with EBADF. Device-gone errnos
+// become ErrDeviceGone; anything else is returned unchanged.
+func (s *Stream) terminalError(err error) error {
+	if s.closed.Load() || errors.Is(err, unix.EBADF) {
+		return ErrClosed
+	}
+	if errors.Is(err, unix.EBADFD) {
+		gone := deviceDisconnected(s.pcm)
+		if s.closed.Load() {
+			return ErrClosed
+		}
+		if gone {
+			return ErrDeviceGone
+		}
+		return err
+	}
+	if alsa.IsDeviceGone(err) {
+		return ErrDeviceGone
+	}
+	return err
+}
+
+// deviceDisconnected reports whether a PVERSION probe shows the device gone:
+// ENODEV/ENXIO/ENOENT (the card's file operations were shut down) or EBADFD (the
+// PCM alone is DISCONNECTED). EBADF (closed) and success are not disconnects.
+func deviceDisconnected(p pcm) bool {
+	perr := p.Probe()
+	return perr != nil && (alsa.IsDeviceGone(perr) || errors.Is(perr, unix.EBADFD))
+}
+
+// Xruns returns the number of capture discontinuities recovered so far:
+// overruns, resumes after a system suspend, and restarted stalls.
 func (s *Stream) Xruns() uint64 { return s.xruns.Load() }
 
 // Close stops and closes the stream. It is idempotent and unblocks a Read
@@ -214,14 +266,6 @@ func alsaFormat(f Format) (uint32, error) {
 	}
 }
 
-// isDeviceGoneErrno reports whether err (or an error it wraps) is one of the
-// ALSA errnos that mean the device is missing or was removed: ENODEV, ENXIO, or
-// ENOENT. It is the single source of truth for that errno set, shared by Open,
-// Start, Read, and the capability query so the set cannot drift between them.
-func isDeviceGoneErrno(err error) bool {
-	return errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENOENT)
-}
-
 // translateOpenError converts the errors the open-and-negotiate path can return
 // into the public typed errors so callers never import internal/alsa: an
 // unsupported rate becomes *BadRateError, an unsupported channel/format
@@ -243,20 +287,7 @@ func translateOpenError(err error, channels int, format Format) error {
 	if errors.Is(err, unix.EBUSY) {
 		return ErrDeviceInUse
 	}
-	if isDeviceGoneErrno(err) {
-		return ErrDeviceGone
-	}
-	return err
-}
-
-// translateReadError maps the raw errnos an unrecoverable capture read can hit
-// onto the package's typed errors, so a caller never imports internal/alsa or
-// matches bare errnos to notice a disconnect. A device that disappeared
-// (unplugged, disabled, or otherwise invalidated) becomes ErrDeviceGone; this
-// mirrors translateQueryError so Read and SupportedRates report a lost device
-// the same way. Anything else is returned unchanged.
-func translateReadError(err error) error {
-	if isDeviceGoneErrno(err) {
+	if alsa.IsDeviceGone(err) {
 		return ErrDeviceGone
 	}
 	return err

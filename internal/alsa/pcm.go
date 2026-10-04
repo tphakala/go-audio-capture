@@ -98,34 +98,62 @@ type ioctlError struct {
 func (e *ioctlError) Error() string { return "alsa: " + e.Op + ": " + e.Err.Error() }
 func (e *ioctlError) Unwrap() error { return e.Err }
 
+// sysOpen and sysSetNonblock are the open(2) and fcntl(2) seams, so tests can
+// observe the open flags without a /dev/snd node.
+var (
+	sysOpen        = unix.Open
+	sysSetNonblock = unix.SetNonblock
+)
+
+// resumeRetries and resumeSleep bound the RESUME retry loop in Recover: up to
+// 100 retries 10 ms apart. resumeSleep is a var so tests can skip and count
+// the waits.
+const resumeRetries = 100
+
+var resumeSleep = func() { time.Sleep(10 * time.Millisecond) }
+
 // OpenPCM opens the capture device /dev/snd/pcmC{card}D{device}c for streaming.
 // It tries O_RDWR first (what alsa-lib uses) and falls back to O_RDONLY on a
 // permission error, since capture needs only reads.
+//
+// Every open attempt carries O_NONBLOCK. Without it the kernel's snd_pcm_open
+// sleeps on pcm->open_wait while every substream is busy; with it the same
+// condition becomes EBUSY at once, which the public layer reports as
+// ErrDeviceInUse. The flag is cleared again before OpenPCM returns: reads must
+// block, and __snd_pcm_lib_xfer takes its blocking mode from substream->f_flags,
+// which is copied from the file at attach and refreshed only by the PREPARE
+// ioctl. Clearing the flag here, before Negotiate's final PREPARE, therefore
+// makes every later read block.
 func OpenPCM(card, device int) (*PCM, error) {
-	return openPCM(card, device, 0)
-}
-
-// OpenPCMForQuery opens the capture device for a capability query only, adding
-// O_NONBLOCK so the open cannot block waiting on the device. Some drivers block
-// a plain capture open until the stream is ready (snd-aloop, for one, blocks
-// until a playback client attaches); a query must never hang on that. HW_REFINE,
-// the only ioctl a query issues, is synchronous and unaffected by O_NONBLOCK.
-func OpenPCMForQuery(card, device int) (*PCM, error) {
-	return openPCM(card, device, unix.O_NONBLOCK)
-}
-
-// openPCM opens the capture PCM node with the given extra open flags, applying
-// the shared O_RDWR-then-O_RDONLY fallback so both entry points behave alike.
-func openPCM(card, device, extraFlags int) (*PCM, error) {
 	path := fmt.Sprintf("/dev/snd/pcmC%dD%dc", card, device)
-	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|extraFlags, 0)
+	fd, err := sysOpen(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil && errors.Is(err, unix.EACCES) {
-		fd, err = unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|extraFlags, 0)
+		fd, err = sysOpen(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	}
 	if err != nil {
 		return nil, &ioctlError{Op: "open " + path, Err: err}
 	}
+	if err := sysSetNonblock(fd, false); err != nil {
+		_ = unix.Close(fd)
+		return nil, &ioctlError{Op: "fcntl(F_SETFL) " + path, Err: err}
+	}
 	return newPCM(fd, ioctl), nil
+}
+
+// IsDeviceGone reports whether err (or an error it wraps) is one of the errnos
+// that mean the device is missing or was removed: ENODEV, ENXIO, or ENOENT.
+// It is the single source of truth for that set, shared by Recover and the
+// public layer.
+func IsDeviceGone(err error) bool {
+	return errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENOENT)
+}
+
+// IsRecoverable reports whether err (or an error it wraps) is one Recover
+// handles: EPIPE (overrun), ESTRPIPE (suspend) or EIO (stall). It is the single
+// source of truth for that set, so Stream.Read counts against its recovery
+// budget exactly the errnos Recover can act on.
+func IsRecoverable(err error) bool {
+	return errors.Is(err, unix.EPIPE) || errors.Is(err, unix.ESTRPIPE) || errors.Is(err, unix.EIO)
 }
 
 // newPCM builds a PCM and wires the condition variable to the mutex. It is the
@@ -282,6 +310,19 @@ func (p *PCM) control(req uintptr, op string) error {
 	return nil
 }
 
+// Probe issues SNDRV_PCM_IOCTL_PVERSION, the cheapest PCM ioctl: it changes no
+// state, so its only failures on a live fd are the disconnect ones. After
+// snd_card_disconnect swaps the file operations it returns ENODEV; if only the
+// PCM is DISCONNECTED, snd_pcm_common_ioctl returns EBADFD. Once the PCM is
+// closed it returns EBADF without touching the fd.
+func (p *PCM) Probe() error {
+	var v int32
+	if err := p.guardedIoctl(iocPVersion, unsafe.Pointer(&v)); err != nil {
+		return &ioctlError{Op: "PVERSION", Err: err}
+	}
+	return nil
+}
+
 // ReadI reads up to frames interleaved frames into buf via READI_FRAMES and
 // returns the number of frames actually read. It returns the raw errno (for
 // Recover to classify) rather than a wrapped error. buf must hold at least
@@ -312,35 +353,57 @@ func (p *PCM) ReadI(buf []byte, frames int) (int, error) {
 	return int(p.xferi.Result), nil
 }
 
-// Recover handles a transfer error. An overrun (EPIPE) is cleared by
-// re-preparing and restarting. A suspend (ESTRPIPE) is cleared by retrying
-// RESUME until the system resumes, then re-preparing. Anything else is returned
-// unchanged as unrecoverable.
+// Recover handles a transfer error:
+//   - EPIPE (overrun): re-prepare and restart.
+//   - ESTRPIPE (system suspend): RESUME. A successful RESUME leaves the stream
+//     RUNNING (snd_pcm_post_resume restores the pre-suspend state), where PREPARE
+//     would fail with EBUSY, so it returns at once. EBADF and device-gone errnos
+//     are returned; EAGAIN is retried up to resumeRetries times; any other
+//     failure (ENOSYS, a driver trigger error) falls back to PREPARE+START.
+//   - EIO (stall): READI_FRAMES timed out in wait_for_avail, which leaves the
+//     stream RUNNING, and PREPARE on a running stream is EBUSY, so DROP first,
+//     then PREPARE+START.
+//   - anything else is returned unchanged as unrecoverable.
 func (p *PCM) Recover(err error) error {
+	if !IsRecoverable(err) {
+		return err
+	}
 	switch {
-	case errors.Is(err, unix.EPIPE):
-		if e := p.Prepare(); e != nil {
+	case errors.Is(err, unix.ESTRPIPE):
+		return p.resume()
+	case errors.Is(err, unix.EIO):
+		if e := p.control(iocDrop, "DROP"); e != nil {
 			return e
 		}
-		return p.Start()
-	case errors.Is(err, unix.ESTRPIPE):
-		for {
-			e := p.guardedIoctl(iocResume, nil)
-			if e == nil || errors.Is(e, unix.ENOSYS) {
-				break // resumed, or driver has no RESUME: fall through to prepare
-			}
-			if errors.Is(e, unix.EAGAIN) {
-				time.Sleep(10 * time.Millisecond)
-				continue
-			}
+	}
+	return p.restart()
+}
+
+// restart re-prepares and starts the stream.
+func (p *PCM) restart() error {
+	if e := p.Prepare(); e != nil {
+		return e
+	}
+	return p.Start()
+}
+
+// resume implements the ESTRPIPE arm of Recover.
+func (p *PCM) resume() error {
+	for attempt := 0; ; attempt++ {
+		e := p.guardedIoctl(iocResume, nil)
+		if e == nil {
+			return nil
+		}
+		if errors.Is(e, unix.EBADF) || IsDeviceGone(e) {
 			return &ioctlError{Op: "RESUME", Err: e}
 		}
-		if e := p.Prepare(); e != nil {
-			return e
+		if errors.Is(e, unix.EAGAIN) && attempt < resumeRetries {
+			resumeSleep()
+			continue
 		}
-		return p.Start()
-	default:
-		return err
+		// ENOSYS, EBADFD, a driver error, or EAGAIN that never cleared:
+		// snd_pcm_prepare stops a SUSPENDED stream to SETUP itself, so re-prepare.
+		return p.restart()
 	}
 }
 
