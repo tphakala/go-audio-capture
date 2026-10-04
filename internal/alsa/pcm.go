@@ -133,6 +133,10 @@ func (e *noNearError) Error() string {
 }
 func (e *noNearError) Unwrap() error { return e.err }
 
+// opHwRefine names SNDRV_PCM_IOCTL_HW_REFINE in an ioctlError; refines fail
+// from several call sites (negotiation, nearest-geometry probing, rate queries).
+const opHwRefine = "HW_REFINE"
+
 // ioctlError wraps an errno with the name of the ioctl that failed, so callers
 // never see a bare "invalid argument".
 type ioctlError struct {
@@ -503,7 +507,7 @@ func (p *PCM) Close() error {
 
 func (p *PCM) refine(hw *HwParams) error {
 	if err := p.guardedIoctl(iocHwRefine, unsafe.Pointer(hw)); err != nil {
-		return &ioctlError{Op: "HW_REFINE", Err: err}
+		return &ioctlError{Op: opHwRefine, Err: err}
 	}
 	return nil
 }
@@ -641,7 +645,7 @@ func (p *PCM) refineNear(hw *HwParams, param int, target uint32) error {
 		return *c.interval(param), !c.IntervalEmpty(param), nil
 	}
 
-	last := error(&ioctlError{Op: "HW_REFINE", Err: unix.EINVAL})
+	last := error(&ioctlError{Op: opHwRefine, Err: unix.EINVAL})
 	try := func(v uint32) (bool, error) {
 		ok, err := pin(v)
 		if err != nil && errors.Is(err, unix.EINVAL) {

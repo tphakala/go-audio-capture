@@ -80,7 +80,7 @@ func (p *PCM) SupportedRates(channels int, format uint32, candidates []int) (rat
 			if errors.Is(perr, unix.EINVAL) {
 				continue
 			}
-			return nil, lo, hi, &ioctlError{Op: "HW_REFINE", Err: perr}
+			return nil, lo, hi, &ioctlError{Op: opHwRefine, Err: perr}
 		}
 		if probe.IntervalEmpty(ParamRate) { // defensive: some drivers empty rather than EINVAL
 			continue
