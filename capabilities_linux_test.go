@@ -147,8 +147,7 @@ func TestSupportedRatesVerifiedPropagatesRefinePassError(t *testing.T) {
 	withOpenRatePCM(t, func(int, int) (ratePCM, error) { return fake, nil })
 
 	_, err := SupportedRatesVerified("hw:0,0", 1, FormatS32LE)
-	var bfe *BadFormatError
-	if !errors.As(err, &bfe) {
+	if _, ok := errors.AsType[*BadFormatError](err); !ok {
 		t.Fatalf("err = %v, want *BadFormatError", err)
 	}
 	if len(fake.gotVerify) != 0 {
@@ -162,8 +161,7 @@ func TestSupportedRatesRejectsBadDevice(t *testing.T) {
 		return nil, errShouldNotOpen
 	})
 	_, err := SupportedRates("not-a-device", 1, FormatS32LE)
-	var bde *BadDeviceError
-	if !errors.As(err, &bde) {
+	if _, ok := errors.AsType[*BadDeviceError](err); !ok {
 		t.Fatalf("err = %v, want *BadDeviceError", err)
 	}
 }
@@ -174,8 +172,8 @@ func TestSupportedRatesRejectsBadChannels(t *testing.T) {
 		return nil, errShouldNotOpen
 	})
 	_, err := SupportedRates("hw:0,0", 0, FormatS32LE)
-	var ce *ConfigError
-	if !errors.As(err, &ce) || ce.Field != "channels" {
+	ce, ok := errors.AsType[*ConfigError](err)
+	if !ok || ce.Field != "channels" {
 		t.Fatalf("err = %v, want ConfigError{channels}", err)
 	}
 }
@@ -186,8 +184,8 @@ func TestSupportedRatesRejectsBadFormat(t *testing.T) {
 		return nil, errShouldNotOpen
 	})
 	_, err := SupportedRates("hw:0,0", 1, Format(999))
-	var ce *ConfigError
-	if !errors.As(err, &ce) || ce.Field != "format" {
+	ce, ok := errors.AsType[*ConfigError](err)
+	if !ok || ce.Field != "format" {
 		t.Fatalf("err = %v, want ConfigError{format}", err)
 	}
 }
@@ -319,8 +317,8 @@ func TestSupportedRatesMapsAlsaBadFormatWithRange(t *testing.T) {
 	fake := &fakeRatePCM{ratesErr: &alsa.BadFormatError{Channels: 1, Format: alsa.FormatS32LE, MinChannels: 4, MaxChannels: 4}}
 	withOpenRatePCM(t, func(int, int) (ratePCM, error) { return fake, nil })
 	_, err := SupportedRates(hwAddrCard1, 1, FormatS32LE)
-	var bfe *BadFormatError
-	if !errors.As(err, &bfe) {
+	bfe, ok := errors.AsType[*BadFormatError](err)
+	if !ok {
 		t.Fatalf("err = %v, want *BadFormatError", err)
 	}
 	if bfe.Channels != 1 || bfe.Format != FormatS32LE || bfe.MinChannels != 4 || bfe.MaxChannels != 4 {

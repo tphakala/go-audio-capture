@@ -78,8 +78,8 @@ func runReads(t *testing.T, reads [][]error, wantFail bool, wantRec int, wantXru
 			t.Fatalf("read %d: looped without bound", i)
 		}
 		if wantFail && i == len(reads)-1 {
-			var se *StallError
-			if !errors.As(err, &se) || !errors.Is(err, ErrDeviceStalled) {
+			se, ok := errors.AsType[*StallError](err)
+			if !ok || !errors.Is(err, ErrDeviceStalled) {
 				t.Fatalf("read %d: err = %v, want ErrDeviceStalled", i, err)
 			}
 			if se.Recoveries != wantRec {

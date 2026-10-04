@@ -156,12 +156,10 @@ func waFormat(f Format) (wasapi.SampleFormat, error) {
 // types so callers never import internal/wasapi. cfg supplies the requested
 // channel count and format for BadFormatError.
 func translateWASAPIError(err error, cfg Config) error {
-	var bre *wasapi.BadRateError
-	if errors.As(err, &bre) {
+	if bre, ok := errors.AsType[*wasapi.BadRateError](err); ok {
 		return &BadRateError{Requested: bre.Requested, Min: bre.Min, Max: bre.Max}
 	}
-	var bfe *wasapi.BadFormatError
-	if errors.As(err, &bfe) {
+	if bfe, ok := errors.AsType[*wasapi.BadFormatError](err); ok {
 		return &BadFormatError{Rate: bfe.Rate, Channels: bfe.Channels, Format: cfg.Format}
 	}
 	switch {

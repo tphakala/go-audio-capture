@@ -122,7 +122,7 @@ func quoteGlobMeta(s string) string {
 // card header line). The wrapped second line of each entry is ignored.
 func parseCards(data []byte) map[int]string {
 	names := make(map[int]string)
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		m := cardHeaderRe.FindStringSubmatch(line)
 		if m == nil {
 			continue

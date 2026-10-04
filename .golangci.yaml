@@ -1,8 +1,8 @@
 # Adapted from github.com/tphakala/go-audio-stream's .golangci.yaml to keep one
 # linting standard across the audio projects. go-audio-capture-specific notes:
 #   - single module, no stream-doctor sub-module
-#   - Linux-only in phase 1 (the ALSA backend); Windows/macOS backends land
-#     later and CI grows a matrix then
+#   - CI lints linux/amd64, linux/386 and windows/amd64, since the backends
+#     are split by build tags
 #   - keeps gocritic's ruleguard wired to rules/*.go for modern-Go patterns
 version: "2"
 output:
@@ -27,6 +27,7 @@ linters:
     - iface
     - ineffassign
     - misspell
+    - modernize
     - nilerr
     - nilnil
     - predeclared

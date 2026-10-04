@@ -101,8 +101,8 @@ func TestSupportedRatesEmptyIntervalIsFatal(t *testing.T) {
 	}
 	p := newPCM(-1, fake)
 	_, _, _, err := p.SupportedRates(1, FormatS16LE, []int{48000})
-	var bfe *BadFormatError
-	if !errors.As(err, &bfe) {
+	bfe, ok := errors.AsType[*BadFormatError](err)
+	if !ok {
 		t.Fatalf("SupportedRates err = %v, want *BadFormatError", err)
 	}
 	if bfe.MinChannels != 0 || bfe.MaxChannels != 0 {

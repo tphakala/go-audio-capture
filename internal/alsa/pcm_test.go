@@ -40,8 +40,8 @@ func TestNegotiateRefusesBadRate(t *testing.T) {
 	}
 	p := newPCM(-1, fake)
 	_, err := p.Negotiate(256000, 1, FormatS16LE, 960, 4)
-	var bre *BadRateError
-	if !errors.As(err, &bre) {
+	bre, ok := errors.AsType[*BadRateError](err)
+	if !ok {
 		t.Fatalf("Negotiate(256000) err = %v, want *BadRateError", err)
 	}
 	if bre.Requested != 256000 || bre.Min != 48000 || bre.Max != 48000 {
@@ -64,8 +64,8 @@ func TestNegotiateRefusesBadFormat(t *testing.T) {
 	}
 	p := newPCM(-1, fake)
 	_, err := p.Negotiate(48000, 1, FormatS16LE, 960, 4)
-	var bfe *BadFormatError
-	if !errors.As(err, &bfe) {
+	bfe, ok := errors.AsType[*BadFormatError](err)
+	if !ok {
 		t.Fatalf("Negotiate with refine EINVAL err = %v, want *BadFormatError", err)
 	}
 	if bfe.Channels != 1 || bfe.Format != FormatS16LE {
@@ -87,8 +87,7 @@ func TestNegotiateRefinePassesThroughDeviceGone(t *testing.T) {
 			}
 			p := newPCM(-1, fake)
 			_, err := p.Negotiate(48000, 1, FormatS16LE, 960, 4)
-			var bfe *BadFormatError
-			if errors.As(err, &bfe) {
+			if _, ok := errors.AsType[*BadFormatError](err); ok {
 				t.Fatalf("Negotiate with refine %v = %v, want it NOT a *BadFormatError", errno, err)
 			}
 			if !errors.Is(err, errno) {
@@ -119,8 +118,8 @@ func TestNegotiateRateGapIsBadRate(t *testing.T) {
 	}
 	p := newPCM(-1, fake)
 	_, err := p.Negotiate(44101, 2, FormatS32LE, 882, 4)
-	var bre *BadRateError
-	if !errors.As(err, &bre) {
+	bre, ok := errors.AsType[*BadRateError](err)
+	if !ok {
 		t.Fatalf("Negotiate with rate-pinned refine EINVAL err = %v, want *BadRateError", err)
 	}
 	if bre.Requested != 44101 || bre.Min != 44100 || bre.Max != 96000 {
@@ -146,8 +145,8 @@ func TestNegotiateCommitRefusalIsGeometryError(t *testing.T) {
 	}
 	p := newPCM(-1, fake)
 	_, err := p.Negotiate(44100, 2, FormatS32LE, 882, 4)
-	var ge *GeometryError
-	if !errors.As(err, &ge) {
+	ge, ok := errors.AsType[*GeometryError](err)
+	if !ok {
 		t.Fatalf("Negotiate with HW_PARAMS EINVAL err = %v, want *GeometryError", err)
 	}
 	if ge.Rate != 44100 || ge.PeriodFrames != 882 || ge.Periods != 4 {
@@ -179,9 +178,9 @@ func TestNegotiateCommitPassesThroughDeviceGone(t *testing.T) {
 			}
 			p := newPCM(-1, fake)
 			_, err := p.Negotiate(48000, 2, FormatS32LE, 960, 4)
-			var bre *BadRateError
-			var ge *GeometryError
-			if errors.As(err, &bre) || errors.As(err, &ge) {
+			_, isRate := errors.AsType[*BadRateError](err)
+			_, isGeometry := errors.AsType[*GeometryError](err)
+			if isRate || isGeometry {
 				t.Fatalf("Negotiate with HW_PARAMS %v = %v, want it neither *BadRateError nor *GeometryError", errno, err)
 			}
 			if !errors.Is(err, errno) {
@@ -319,16 +318,14 @@ func TestReadICloseRace(t *testing.T) {
 	p := newPCM(fd, fake)
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		buf := make([]byte, 8)
-		for i := 0; i < 2000; i++ {
+		for range 2000 {
 			if _, rerr := p.ReadI(buf, 1); rerr != nil {
 				return // stops once Close makes acquire return EBADF
 			}
 		}
-	}()
+	})
 
 	if cerr := p.Close(); cerr != nil {
 		t.Errorf("Close: %v", cerr)

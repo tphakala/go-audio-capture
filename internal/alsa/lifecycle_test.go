@@ -195,8 +195,8 @@ func TestRecoverResumeEAGAINStopsOnClose(t *testing.T) {
 	err := p.Recover(unix.ESTRPIPE)
 	// The RESUME after Close fails acquire with EBADF and must end the loop
 	// there: not fall through to PREPARE, and not keep retrying.
-	var ie *ioctlError
-	if !errors.As(err, &ie) || ie.Op != "RESUME" || !errors.Is(err, unix.EBADF) {
+	ie, ok := errors.AsType[*ioctlError](err)
+	if !ok || ie.Op != "RESUME" || !errors.Is(err, unix.EBADF) {
 		t.Fatalf("Recover = %v, want the RESUME ioctl failing with EBADF", err)
 	}
 	if k.resumes != 3 || sleeps != 3 {
