@@ -185,7 +185,7 @@ func translateQueryError(err error) error {
 	switch {
 	case errors.Is(err, unix.EBUSY):
 		return ErrDeviceInUse
-	case isDeviceGoneErrno(err):
+	case alsa.IsDeviceGone(err):
 		return ErrDeviceGone
 	default:
 		return err

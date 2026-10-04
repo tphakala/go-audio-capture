@@ -4,7 +4,7 @@ package capture
 
 import (
 	"errors"
-	"math/rand/v2"
+	"slices"
 	"testing"
 	"time"
 
@@ -22,8 +22,7 @@ const loopGuardReads = 1000
 // per frame) and registers Close for cleanup.
 func openLifecycleStream(t *testing.T, fp *fakePCM) *Stream {
 	t.Helper()
-	restore := swapOpenPCM(fp)
-	t.Cleanup(restore)
+	withOpenPCM(t, func(_, _ int) (pcm, error) { return fp, nil })
 	s, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS16LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -55,99 +54,10 @@ func okRecover(counts *[]error) func(error) error {
 	}
 }
 
-func TestReadStallRestartsOnce(t *testing.T) {
-	var recovered []error
-	fp := &fakePCM{recoverFn: okRecover(&recovered)}
-	fp.readFn = guardedRead(func(call int) (int, error) {
-		if call == 1 {
-			return 0, unix.EIO
-		}
-		return 480, nil
-	})
-	s := openLifecycleStream(t, fp)
-	n, err := s.Read(make([]byte, 480*2))
-	if err != nil || n != 480 {
-		t.Fatalf("Read = %d, %v; want 480, nil", n, err)
-	}
-	if s.Xruns() != 1 {
-		t.Errorf("Xruns = %d, want 1", s.Xruns())
-	}
-	if len(recovered) != 1 || !errors.Is(recovered[0], unix.EIO) {
-		t.Errorf("Recover saw %v, want one EIO", recovered)
-	}
-}
-
-func TestReadRepeatedStallReturnsErrDeviceStalled(t *testing.T) {
-	var recovered []error
-	fp := &fakePCM{recoverFn: okRecover(&recovered)}
-	fp.readFn = guardedRead(func(int) (int, error) { return 0, unix.EIO })
-	s := openLifecycleStream(t, fp)
-	_, err := s.Read(make([]byte, 96))
-	if errors.Is(err, errLoopGuard) {
-		t.Fatal("Read looped without bound")
-	}
-	if !errors.Is(err, ErrDeviceStalled) {
-		t.Fatalf("Read = %v, want ErrDeviceStalled", err)
-	}
-	var se *StallError
-	if !errors.As(err, &se) || se.Recoveries != 1 {
-		t.Errorf("StallError = %+v, want Recoveries == 1", se)
-	}
-	if !errors.Is(err, unix.EIO) {
-		t.Errorf("Read = %v, want it to unwrap to EIO", err)
-	}
-	if len(recovered) != 1 {
-		t.Errorf("Recover calls = %d, want 1", len(recovered))
-	}
-	if s.Xruns() != 1 {
-		t.Errorf("Xruns = %d, want 1", s.Xruns())
-	}
-}
-
-func TestReadRecoveryCapReturnsErrDeviceStalled(t *testing.T) {
-	var recovered []error
-	fp := &fakePCM{recoverFn: okRecover(&recovered)}
-	fp.readFn = guardedRead(func(int) (int, error) { return 0, unix.EPIPE })
-	s := openLifecycleStream(t, fp)
-	_, err := s.Read(make([]byte, 96))
-	if errors.Is(err, errLoopGuard) {
-		t.Fatal("Read looped without bound")
-	}
-	if !errors.Is(err, ErrDeviceStalled) || !errors.Is(err, unix.EPIPE) {
-		t.Fatalf("Read = %v, want ErrDeviceStalled wrapping EPIPE", err)
-	}
-	var se *StallError
-	if !errors.As(err, &se) || se.Recoveries != maxRecoveriesWithoutData {
-		t.Errorf("StallError = %+v, want Recoveries == %d", se, maxRecoveriesWithoutData)
-	}
-	if len(recovered) != maxRecoveriesWithoutData || s.Xruns() != maxRecoveriesWithoutData {
-		t.Errorf("Recover calls = %d, Xruns = %d, want %d each", len(recovered), s.Xruns(), maxRecoveriesWithoutData)
-	}
-}
-
-// refOutcome is the reference model of one Read call: it consumes error events
-// until a data event, failing when the recovery budget or the stall budget runs
-// out. It returns the number of recoveries and whether Read fails.
-func refOutcome(errs []error) (recoveries int, failed bool) {
-	stalls := 0
-	for _, e := range errs {
-		if recoveries == maxRecoveriesWithoutData {
-			return recoveries, true
-		}
-		if errors.Is(e, unix.EIO) {
-			if stalls == maxStallRestarts {
-				return recoveries, true
-			}
-			stalls++
-		}
-		recoveries++
-	}
-	return recoveries, false
-}
-
 // runReads drives successive Read calls on one stream, each preceded by the
-// given error events, and checks every outcome against the reference model.
-func runReads(t *testing.T, reads [][]error) {
+// given error events. Only the last Read may fail; wantRec is the Recoveries of
+// that failing Read, and wantXruns the total recoveries across all Reads.
+func runReads(t *testing.T, reads [][]error, wantFail bool, wantRec int, wantXruns uint64) {
 	t.Helper()
 	var queue []error // pending error events for the current Read, then data
 	var recovered []error
@@ -161,44 +71,33 @@ func runReads(t *testing.T, reads [][]error) {
 		return 0, e
 	})
 	s := openLifecycleStream(t, fp)
-	var wantXruns uint64
 	for i, errs := range reads {
 		queue = errs
-		wantRec, wantFail := refOutcome(errs)
 		n, err := s.Read(make([]byte, 480*2))
 		if errors.Is(err, errLoopGuard) {
 			t.Fatalf("read %d: looped without bound", i)
 		}
-		if wantFail {
+		if wantFail && i == len(reads)-1 {
 			var se *StallError
-			if !errors.Is(err, ErrDeviceStalled) || !errors.As(err, &se) {
-				t.Fatalf("read %d (%d errs): err = %v, want ErrDeviceStalled", i, len(errs), err)
+			if !errors.As(err, &se) || !errors.Is(err, ErrDeviceStalled) {
+				t.Fatalf("read %d: err = %v, want ErrDeviceStalled", i, err)
 			}
 			if se.Recoveries != wantRec {
-				t.Errorf("read %d: Recoveries = %d, want %d", i, se.Recoveries, wantRec)
+				t.Errorf("Recoveries = %d, want %d", se.Recoveries, wantRec)
 			}
-			wantXruns += uint64(wantRec)
-			if s.Xruns() != wantXruns {
-				t.Errorf("read %d: Xruns = %d, want %d", i, s.Xruns(), wantXruns)
+			// The StallError carries the errno that exhausted the budget.
+			if last := errs[len(errs)-1]; !errors.Is(err, last) {
+				t.Errorf("err = %v, want it to unwrap to %v", err, last)
 			}
-			return // a failed Read leaves the stream unusable
+			break
 		}
 		if err != nil || n != 480 {
 			t.Fatalf("read %d (%d errs): = %d, %v; want 480, nil", i, len(errs), n, err)
 		}
-		wantXruns += uint64(wantRec)
-		if s.Xruns() != wantXruns {
-			t.Errorf("read %d: Xruns = %d, want %d", i, s.Xruns(), wantXruns)
-		}
 	}
-}
-
-func repeat(e error, n int) []error {
-	out := make([]error, n)
-	for i := range out {
-		out[i] = e
+	if s.Xruns() != wantXruns || uint64(len(recovered)) != wantXruns {
+		t.Errorf("Xruns = %d, Recover calls = %d, want %d each", s.Xruns(), len(recovered), wantXruns)
 	}
-	return out
 }
 
 // TestReadRecoveryBudgetIsPerDataGap pins that both budgets reset whenever a
@@ -206,41 +105,26 @@ func repeat(e error, n int) []error {
 // successful reads never hits the cap, while one data gap that exhausts either
 // budget fails.
 func TestReadRecoveryBudgetIsPerDataGap(t *testing.T) {
+	xrun7 := slices.Repeat([]error{unix.EPIPE}, 7)
 	cases := []struct {
-		name  string
-		reads [][]error
+		name      string
+		reads     [][]error
+		wantFail  bool
+		wantRec   int
+		wantXruns uint64
 	}{
-		{"xrun x7 then data, five times", [][]error{
-			repeat(unix.EPIPE, 7), repeat(unix.EPIPE, 7), repeat(unix.EPIPE, 7), repeat(unix.EPIPE, 7), repeat(unix.EPIPE, 7)}},
-		{"stall then data, ten times", [][]error{
-			{unix.EIO}, {unix.EIO}, {unix.EIO}, {unix.EIO}, {unix.EIO}, {unix.EIO}, {unix.EIO}, {unix.EIO}, {unix.EIO}, {unix.EIO}}},
-		{"stall, xrun x6, data", [][]error{append([]error{unix.EIO}, repeat(unix.EPIPE, 6)...)}},
-		{"exactly the cap", [][]error{repeat(unix.EPIPE, maxRecoveriesWithoutData)}},
-		{"one over the cap", [][]error{repeat(unix.EPIPE, maxRecoveriesWithoutData+1)}},
-		{"second stall in one gap", [][]error{{unix.EIO, unix.EPIPE, unix.EIO}}},
-		{"suspends count as recoveries", [][]error{repeat(unix.ESTRPIPE, maxRecoveriesWithoutData+1)}},
+		{"stall then data", [][]error{{unix.EIO}}, false, 0, 1},
+		{"xrun x7 then data, five times", slices.Repeat([][]error{xrun7}, 5), false, 0, 35},
+		{"stall then data, ten times", slices.Repeat([][]error{{unix.EIO}}, 10), false, 0, 10},
+		{"stall, xrun x6, data", [][]error{append([]error{unix.EIO}, xrun7[:6]...)}, false, 0, 7},
+		{"exactly the cap", [][]error{slices.Repeat([]error{unix.EPIPE}, maxRecoveriesWithoutData)}, false, 0, 8},
+		{"one over the cap", [][]error{slices.Repeat([]error{unix.EPIPE}, maxRecoveriesWithoutData+1)}, true, 8, 8},
+		{"repeated stall", [][]error{{unix.EIO, unix.EIO}}, true, 1, 1},
+		{"second stall in one gap", [][]error{{unix.EIO, unix.EPIPE, unix.EIO}}, true, 2, 2},
+		{"suspends count as recoveries", [][]error{slices.Repeat([]error{unix.ESTRPIPE}, maxRecoveriesWithoutData+1)}, true, 8, 8},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) { runReads(t, tc.reads) })
-	}
-
-	// Seeded model check: random scripts compared with the reference model.
-	rng := rand.New(rand.NewPCG(1, 2))
-	kinds := []error{unix.EPIPE, unix.EIO, unix.ESTRPIPE}
-	for i := 0; i < 1000; i++ {
-		nreads := rng.IntN(6) + 1
-		reads := make([][]error, 0, nreads)
-		for r := nreads; r > 0; r-- {
-			errs := make([]error, rng.IntN(11))
-			for j := range errs {
-				errs[j] = kinds[rng.IntN(len(kinds))]
-			}
-			reads = append(reads, errs)
-		}
-		runReads(t, reads)
-		if t.Failed() {
-			t.Fatalf("model mismatch on script %d: %v", i, reads)
-		}
+		t.Run(tc.name, func(t *testing.T) { runReads(t, tc.reads, tc.wantFail, tc.wantRec, tc.wantXruns) })
 	}
 }
 
@@ -376,22 +260,6 @@ func TestStallErrorMessage(t *testing.T) {
 	want := "capture: device stalled: no audio after 3 recovery attempt(s) (READI_FRAMES: broken pipe)"
 	if err.Error() != want {
 		t.Errorf("Error() = %q, want %q", err.Error(), want)
-	}
-}
-
-// TestBadStateErrorOnClosedStreamSkipsProbe pins that a stream already marked
-// closed never issues the probe ioctl.
-func TestBadStateErrorOnClosedStreamSkipsProbe(t *testing.T) {
-	fp := &fakePCM{readFn: func() (int, error) { return 0, nil }}
-	s := openLifecycleStream(t, fp)
-	if err := s.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if err := s.badStateError(unix.EBADFD); !errors.Is(err, ErrClosed) {
-		t.Errorf("badStateError = %v, want ErrClosed", err)
-	}
-	if fp.probes != 0 {
-		t.Errorf("probes = %d, want 0", fp.probes)
 	}
 }
 

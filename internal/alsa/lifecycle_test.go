@@ -272,7 +272,6 @@ func TestProbe(t *testing.T) {
 	t.Run("closed", func(t *testing.T) {
 		var calls int
 		p := newPCM(openDevNull(t), func(int, uintptr, unsafe.Pointer) error { calls++; return nil })
-		calls = 0
 		_ = p.Close() // best-effort DROP goes through the fake
 		calls = 0
 		if err := p.Probe(); !errors.Is(err, unix.EBADF) {
