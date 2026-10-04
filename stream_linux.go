@@ -19,8 +19,27 @@ type pcm interface {
 	Start() error
 	ReadI(buf []byte, frames int) (int, error)
 	Recover(err error) error
+	Probe() error
 	Close() error
 }
+
+// Recovery budgets for one Read call. Read returns as soon as ReadI delivers
+// frames, so "recoveries inside one call" equals "consecutive recoveries with no
+// delivered frames" and the counters can be plain locals: a long-running stream
+// with periodic xruns between successful reads never reaches either cap.
+//
+//   - maxRecoveriesWithoutData bounds a device that overruns or fails again right
+//     after every restart. The legitimate sequences inside one data gap are short
+//     (a resume then an overrun, an overrun after a stall restart: 2-3), so 8
+//     leaves margin while capping the ioctl churn.
+//   - maxStallRestarts bounds EIO, the READI_FRAMES timeout (wait_for_avail:
+//     about 100 ms at the default geometry on kernels from 6.6, 10 s up to 6.1).
+//     One DROP+PREPARE+START restart is tried; a second EIO in the same gap means
+//     the restart did not help and the caller must reopen.
+const (
+	maxRecoveriesWithoutData = 8
+	maxStallRestarts         = 1
+)
 
 var openPCM = func(card, device int) (pcm, error) {
 	p, err := alsa.OpenPCM(card, device)
@@ -48,8 +67,9 @@ type Stream struct {
 // a well-formed stable id matches no present device, *AmbiguousDeviceError when
 // it matches more than one, *BadRateError for an unsupported rate,
 // *BadFormatError for an unsupported channel/format combination, ErrDeviceInUse
-// when another application holds the device, and ErrDeviceGone when the device is
-// missing or was removed.
+// when another application holds the device (Open fails at once rather than
+// waiting for it to be released), and ErrDeviceGone when the device is missing or
+// was removed.
 func Open(cfg Config) (*Stream, error) {
 	// Cheap, device-independent checks first, so an obviously invalid config is
 	// rejected before a /proc + /sys enumeration resolves the id. SupportedRates
@@ -97,6 +117,12 @@ func Open(cfg Config) (*Stream, error) {
 	}
 	n, err := p.Negotiate(cfg.Rate, cfg.Channels, format, periodFrames, periods)
 	if err != nil {
+		// EBADFD from a negotiate ioctl means the PCM left the state the call
+		// needs; probe before closing to tell a device that vanished mid-open
+		// from any other cause.
+		if errors.Is(err, unix.EBADFD) && deviceDisconnected(p) {
+			err = ErrDeviceGone
+		}
 		_ = p.Close()
 		return nil, translateOpenError(err, cfg.Channels, cfg.Format)
 	}
@@ -134,20 +160,30 @@ func (s *Stream) Start() error {
 		if isDeviceGoneErrno(err) {
 			return ErrDeviceGone
 		}
+		// START on a disconnected stream is EBADFD, but so is a second START on
+		// a running one; the probe tells them apart.
+		if errors.Is(err, unix.EBADFD) {
+			return s.badStateError(err)
+		}
 		return err
 	}
 	return nil
 }
 
 // Read fills buf with whole interleaved frames and returns the number of frames
-// read. It blocks until at least one period is available. An overrun (xrun) is
-// recovered internally (the counter is bumped and the read retried). Read
+// read. It blocks until at least one period is available. Recoverable failures
+// are handled internally and counted (see Xruns): an overrun is restarted, a
+// system suspend is resumed, and a stalled stream (EIO, the kernel's read
+// timeout) gets one restart. Recovery is bounded per call: a second stall, or
+// more than a handful of recoveries without any frames being delivered, returns
+// a *StallError (which unwraps to ErrDeviceStalled and to the last errno). Read
 // returns ErrClosed when the stream is closed and ErrDeviceGone when the device
-// disappears (e.g. a USB capture device unplugged mid-stream); any other
-// unrecoverable error is returned unchanged. Any returned error leaves the
-// stream unusable (a short read, fewer frames than requested, is not an error and
-// returns a nil error): the caller must Close it (Read does not release the
-// device fd on its own) and, to resume, Open a new stream.
+// disappears (e.g. a USB capture device unplugged mid-stream, including while
+// Read is parked in the driver); any other unrecoverable error is returned
+// unchanged. Any returned error leaves the stream unusable (a short read, fewer
+// frames than requested, is not an error and returns a nil error): the caller
+// must Close it (Read does not release the device fd on its own) and, to resume,
+// Open a new stream.
 func (s *Stream) Read(buf []byte) (int, error) {
 	if s.closed.Load() {
 		return 0, ErrClosed
@@ -156,6 +192,7 @@ func (s *Stream) Read(buf []byte) (int, error) {
 	if frames == 0 {
 		return 0, nil
 	}
+	var recoveries, stalls int
 	for {
 		n, err := s.pcm.ReadI(buf, frames)
 		if err == nil {
@@ -169,11 +206,32 @@ func (s *Stream) Read(buf []byte) (int, error) {
 		if s.closed.Load() || errors.Is(err, unix.EBADF) {
 			return 0, ErrClosed
 		}
+		// EBADFD was never recoverable. Besides Close it means the PCM was
+		// disconnected (the unplug wakes a parked reader with it), so classify it
+		// instead of returning the raw errno.
+		if errors.Is(err, unix.EBADFD) {
+			return 0, s.badStateError(err)
+		}
+		// Budget checks come before any counter changes, so once the budget is
+		// spent nothing else moves.
+		if recoveries == maxRecoveriesWithoutData {
+			return 0, &StallError{Recoveries: recoveries, Err: err}
+		}
+		if errors.Is(err, unix.EIO) {
+			if stalls == maxStallRestarts {
+				return 0, &StallError{Recoveries: recoveries, Err: err}
+			}
+			stalls++
+		}
+		recoveries++
 		if rerr := s.pcm.Recover(err); rerr != nil {
 			// A concurrent Close can fail Recover's own ioctls with EBADF;
 			// surface that as a clean close rather than a raw driver error.
 			if s.closed.Load() || errors.Is(rerr, unix.EBADF) {
 				return 0, ErrClosed
+			}
+			if errors.Is(rerr, unix.EBADFD) {
+				return 0, s.badStateError(rerr)
 			}
 			// Unrecoverable: Recover returns the error unchanged. Map a
 			// disappeared device onto ErrDeviceGone so a caller can classify a
@@ -184,7 +242,36 @@ func (s *Stream) Read(buf []byte) (int, error) {
 	}
 }
 
-// Xruns returns the number of buffer overruns recovered so far.
+// badStateError classifies an EBADFD that did not come from a concurrent Close.
+// The kernel returns EBADFD for a PCM in DISCONNECTED state (an unplug) but also
+// for ordinary state errors, so one PVERSION probe decides: a disconnect becomes
+// ErrDeviceGone, anything else is err unchanged. A Close always wins: s.closed is
+// checked before the probe (no ioctl on a closing stream) and again after it,
+// since a Close racing the probe makes it fail with EBADF.
+func (s *Stream) badStateError(err error) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	gone := deviceDisconnected(s.pcm)
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	if gone {
+		return ErrDeviceGone
+	}
+	return err
+}
+
+// deviceDisconnected reports whether a PVERSION probe shows the device gone:
+// ENODEV/ENXIO/ENOENT (the card's file operations were shut down) or EBADFD (the
+// PCM alone is DISCONNECTED). EBADF (closed) and success are not disconnects.
+func deviceDisconnected(p pcm) bool {
+	perr := p.Probe()
+	return perr != nil && (isDeviceGoneErrno(perr) || errors.Is(perr, unix.EBADFD))
+}
+
+// Xruns returns the number of capture discontinuities recovered so far:
+// overruns, resumes after a system suspend, and restarted stalls.
 func (s *Stream) Xruns() uint64 { return s.xruns.Load() }
 
 // Close stops and closes the stream. It is idempotent and unblocks a Read
@@ -218,9 +305,7 @@ func alsaFormat(f Format) (uint32, error) {
 // ALSA errnos that mean the device is missing or was removed: ENODEV, ENXIO, or
 // ENOENT. It is the single source of truth for that errno set, shared by Open,
 // Start, Read, and the capability query so the set cannot drift between them.
-func isDeviceGoneErrno(err error) bool {
-	return errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENOENT)
-}
+func isDeviceGoneErrno(err error) bool { return alsa.IsDeviceGone(err) }
 
 // translateOpenError converts the errors the open-and-negotiate path can return
 // into the public typed errors so callers never import internal/alsa: an

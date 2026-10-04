@@ -28,6 +28,13 @@ var ErrDeviceInUse = errors.New("capture: device is in use by another applicatio
 // any point from resolution through the stream lifecycle.
 var ErrDeviceGone = errors.New("capture: device is gone")
 
+// ErrDeviceStalled reports that the device is present but stopped delivering
+// audio: Stream.Read on Linux returns it (wrapped in a *StallError) when a read
+// stall repeats after a restart, or when recovery repeats without any frames
+// being delivered. The stream is unusable; Close it and Open a new one. Windows
+// does not return it yet.
+var ErrDeviceStalled = errors.New("capture: device stopped delivering audio")
+
 // ErrCapabilitiesUnsupported reports that device capability queries such as
 // SupportedRates are not implemented on this platform (currently Linux/ALSA
 // only). Callers should fall back to a static rate list.
@@ -79,6 +86,22 @@ func (e *DeviceNotFoundError) Error() string {
 
 // Unwrap reports ErrDeviceGone so errors.Is(err, ErrDeviceGone) holds.
 func (e *DeviceNotFoundError) Unwrap() error { return ErrDeviceGone }
+
+// StallError is the concrete error behind ErrDeviceStalled. Recoveries is the
+// number of recoveries attempted in the failing Read, none of which delivered
+// frames; Err is the last READI_FRAMES errno (EIO for a timeout, EPIPE for an
+// overrun, and so on). It unwraps to both ErrDeviceStalled and Err.
+type StallError struct {
+	Recoveries int
+	Err        error
+}
+
+func (e *StallError) Error() string {
+	return fmt.Sprintf("capture: device stalled: no audio after %d recovery attempt(s) (READI_FRAMES: %v)", e.Recoveries, e.Err)
+}
+
+// Unwrap reports ErrDeviceStalled and the last errno, so errors.Is matches both.
+func (e *StallError) Unwrap() []error { return []error{ErrDeviceStalled, e.Err} }
 
 // AmbiguousDeviceError reports a device id that matches more than one device
 // present right now, which happens when two identical units report the same

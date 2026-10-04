@@ -25,7 +25,7 @@ These are the reason the library exists. A change that violates one is wrong eve
 5. **Stable device ids.** On Linux `DeviceInfo.ID` is derived from sysfs (USB serial, USB port, or `hw:CARD=<id>,DEV=<n>`), not the probe-order card index. `HWAddr` (`hw:N,D`) is display-only. A stable id is resolved on every `Open`/`SupportedRates*`/`Resolve` call, never cached, and re-verified after the device is opened. Ambiguity (two units with one serial) is an error, never a guess.
 6. **ABI correctness over convenience.** `internal/alsa` mirrors `sound/asound.h`. Struct layouts and size-encoded ioctl numbers differ between LP64 and ILP32 and are pinned in layout tests. Unsupported GOARCHes (big-endian, PowerPC, MIPS) must fail to build via the `unsupported_GOARCH` sentinel in `abi_unsupported.go`, not compile with wrong numbers.
 7. **Zero allocations in steady-state `Read`.** Both backends are allocation-free on the capture path; alloc tests guard this.
-8. **Concurrency contract.** `Read` is single-consumer and blocking. `Close` may be called from another goroutine and must unblock a parked `Read`, which then returns `ErrClosed`. Xruns are recovered internally and counted in `Stream.Xruns()`.
+8. **Concurrency contract.** `Read` is single-consumer and blocking. `Close` may be called from another goroutine and must unblock a parked `Read`, which then returns `ErrClosed`. Xruns are recovered internally and counted in `Stream.Xruns()`; recovery is bounded per `Read`, and a stall or recovery loop returns `ErrDeviceStalled`.
 
 ## Layout
 

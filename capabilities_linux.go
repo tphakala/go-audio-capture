@@ -20,10 +20,10 @@ type ratePCM interface {
 	Close() error
 }
 
-// openRatePCM is a package var so tests can substitute a fake device. It opens
-// with O_NONBLOCK (OpenPCMForQuery) so the probe never blocks on the open.
+// openRatePCM is a package var so tests can substitute a fake device. alsa.OpenPCM
+// opens non-blocking like Open, so a query never waits on a busy device.
 var openRatePCM = func(card, device int) (ratePCM, error) {
-	p, err := alsa.OpenPCMForQuery(card, device)
+	p, err := alsa.OpenPCM(card, device)
 	if err != nil {
 		return nil, err
 	}
@@ -128,8 +128,8 @@ func supportedRatesAt(r resolved, channels int, format Format) (RateSupport, err
 //
 // It is more expensive than SupportedRates (one device open per advertised rate)
 // so it is meant for occasional capability discovery, not a hot path. The
-// per-candidate opens use O_NONBLOCK (like every query here) so they never block
-// on a device that gates its open on a peer, and each commit is discarded by
+// per-candidate opens are non-blocking (alsa.OpenPCM, like every query here) so
+// they never wait on a busy device, and each commit is discarded by
 // closing from the SETUP state. Errors map exactly as SupportedRates: a busy or
 // missing device yields ErrDeviceInUse / ErrDeviceGone and the caller should
 // fall back to a static list.
