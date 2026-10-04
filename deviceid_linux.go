@@ -428,60 +428,61 @@ func resolveForOpen(id string) (resolved, error) {
 }
 
 // resolveDeviceInfo turns a DeviceInfo that Devices or Resolve returned into
-// something openable without enumerating. It reads no file: the caller opens
+// something openable without enumerating, except in one shape (below). It reads
+// no file otherwise: the caller opens
 // d.Card and d.Device and then runs verifyCardIdentity, which re-reads the card's
 // identity from sysfs, so a stale DeviceInfo fails instead of opening whatever
 // holds the index now.
 //
 // It rejects a DeviceInfo whose fields disagree, so a zero value cannot open
 // hw:0,0 and a hand-built one cannot name one card with its ID and another with
-// Card. search is true for the one shape the post-open check cannot pin: a USB
-// serial-form ID with no PortID, where same-serial units are indistinguishable
-// after the open. The caller then resolves d.ID as Open does, which reports
-// *AmbiguousDeviceError when twins are present.
-func resolveDeviceInfo(d *DeviceInfo) (r resolved, search bool, err error) {
+// Card. The one shape the post-open check cannot pin is a USB serial-form ID
+// with no PortID, where same-serial units are indistinguishable after the open;
+// it is resolved by search as Open does, which reports *AmbiguousDeviceError when
+// twins are present.
+func resolveDeviceInfo(d *DeviceInfo) (resolved, error) {
 	trimmed := strings.TrimSpace(d.ID)
 	if trimmed == "" {
-		return resolved{}, false, &ConfigError{Field: "device", Reason: "DeviceInfo.ID is empty; pass a DeviceInfo from Devices or Resolve"}
+		return resolved{}, &ConfigError{Field: "device", Reason: "DeviceInfo.ID is empty; pass a DeviceInfo from Devices or Resolve"}
 	}
 	if d.Card < 0 || d.Device < 0 {
-		return resolved{}, false, &BadDeviceError{Value: d.ID, Err: errors.New("negative card or device number")}
+		return resolved{}, &BadDeviceError{Value: d.ID, Err: errors.New("negative card or device number")}
 	}
 	if !isStableIDForm(trimmed) {
 		// Devices never pairs a numeric id with a PortID: a numeric fallback means
 		// the card has no derivable USB port.
 		if d.PortID != "" {
-			return resolved{}, false, &BadDeviceError{Value: d.PortID, Err: errors.New("PortID set on a numeric DeviceInfo.ID")}
+			return resolved{}, &BadDeviceError{Value: d.PortID, Err: errors.New("PortID set on a numeric DeviceInfo.ID")}
 		}
 		card, dev, perr := parseNumericDeviceID(d.ID)
 		if perr != nil {
-			return resolved{}, false, perr
+			return resolved{}, perr
 		}
 		if card != d.Card || dev != d.Device {
-			return resolved{}, false, &BadDeviceError{Value: d.ID, Err: fmt.Errorf("id names hw:%d,%d but Card and Device are %d,%d", card, dev, d.Card, d.Device)}
+			return resolved{}, &BadDeviceError{Value: d.ID, Err: fmt.Errorf("id names hw:%d,%d but Card and Device are %d,%d", card, dev, d.Card, d.Device)}
 		}
-		return resolved{card: card, device: dev}, false, nil
+		return resolved{card: card, device: dev}, nil
 	}
 	p, err := canonicalStableID(trimmed)
 	if err != nil {
-		return resolved{}, false, err
+		return resolved{}, err
 	}
 	if p.device != d.Device {
-		return resolved{}, false, &BadDeviceError{Value: d.ID, Err: fmt.Errorf("id names device %d but Device is %d", p.device, d.Device)}
+		return resolved{}, &BadDeviceError{Value: d.ID, Err: fmt.Errorf("id names device %d but Device is %d", p.device, d.Device)}
 	}
-	r = resolved{card: d.Card, device: d.Device, verifyID: p.canon}
+	r := resolved{card: d.Card, device: d.Device, verifyID: p.canon}
 	if d.PortID != "" {
 		pp, err := checkPortID(d.PortID, p)
 		if err != nil {
-			return resolved{}, false, err
+			return resolved{}, err
 		}
 		r.verifyPort = pp
-		return r, false, nil
+		return r, nil
 	}
 	if p.usb && !p.port {
-		return resolved{}, true, nil
+		return resolveForOpen(d.ID)
 	}
-	return r, false, nil
+	return r, nil
 }
 
 // checkPortID validates a DeviceInfo.PortID against the already-parsed ID and

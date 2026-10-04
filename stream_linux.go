@@ -112,14 +112,9 @@ func OpenDevice(d DeviceInfo, cfg Config) (*Stream, error) {
 	if err != nil {
 		return nil, err
 	}
-	r, search, err := resolveDeviceInfo(&d)
+	r, err := resolveDeviceInfo(&d)
 	if err != nil {
 		return nil, err
-	}
-	if search {
-		if r, err = resolveForOpen(d.ID); err != nil {
-			return nil, err
-		}
 	}
 	cfg.Device = d.ID
 	return openResolved(r, cfg, format)
@@ -156,10 +151,8 @@ func openResolved(r resolved, cfg Config, format uint32) (*Stream, error) {
 		// absent for reasons that say nothing about our unit. Show the card is
 		// still ours before attributing the failure to it, or a busy stranger reads
 		// as ErrDeviceInUse and the caller retries against it forever.
-		if r.verifyID != "" {
-			if verr := verifyCardIdentity(r); verr != nil {
-				return nil, verr
-			}
+		if verr := verifyCardIdentity(r); verr != nil {
+			return nil, verr
 		}
 		// A device that is absent or removed at open time fails here (the PCM
 		// node is missing, or the driver reports the card gone). Classify it the

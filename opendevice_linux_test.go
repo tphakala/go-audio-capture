@@ -81,8 +81,6 @@ func TestSupportedRatesBusyOnUnchangedCardIsDeviceInUse(t *testing.T) {
 	}
 }
 
-const fieldChannels = "channels"
-
 var odCfg = Config{Rate: 48000, Channels: 1, Format: FormatS16LE}
 
 // twinLayout is two same-serial units on ports 3 and 4. swap puts the port-4
@@ -106,16 +104,15 @@ func breakEnumeration(t *testing.T, sys string) {
 	setRoots(t, absentSysRoot(t), sys)
 }
 
-func recordOpen(t *testing.T) (card, device *int, p *fakePCM) {
+func recordOpen(t *testing.T) (card, device *int) {
 	t.Helper()
 	card, device = new(int), new(int)
 	*card, *device = -1, -1
-	p = &fakePCM{}
 	withOpenPCM(t, func(c, d int) (pcm, error) {
 		*card, *device = c, d
-		return p, nil
+		return &fakePCM{}, nil
 	})
-	return card, device, p
+	return card, device
 }
 
 func mustResolve(t *testing.T, id string) DeviceInfo {
@@ -133,7 +130,7 @@ func TestOpenDeviceDoesNotEnumerate(t *testing.T) {
 	_, sys := useFixture(t, hostLayout())
 	d := mustResolve(t, wantSerialID)
 	breakEnumeration(t, sys)
-	card, device, _ := recordOpen(t)
+	card, device := recordOpen(t)
 
 	// Open resolves the id by enumerating, so with enumeration broken it fails.
 	// That proves the fixture really breaks enumeration, and that an OpenDevice
@@ -253,7 +250,7 @@ func TestOpenDeviceTwinPinnedByPort(t *testing.T) {
 	}
 
 	t.Run("unchanged opens card 2", func(t *testing.T) {
-		card, _, _ := recordOpen(t)
+		card, _ := recordOpen(t)
 		s, err := OpenDevice(d, odCfg)
 		if err != nil {
 			t.Fatalf("OpenDevice: %v", err)
@@ -322,7 +319,7 @@ func TestOpenDeviceSerialWithoutPortSearches(t *testing.T) {
 		if d.PortID != "" || d.ID == "" || !d.IDStable {
 			t.Fatalf("setup: %+v", d)
 		}
-		card, _, _ := recordOpen(t)
+		card, _ := recordOpen(t)
 		s, err := OpenDevice(d, odCfg)
 		if err != nil {
 			t.Fatalf("OpenDevice: %v", err)
@@ -346,6 +343,7 @@ func TestOpenDeviceBusyWrongCardIsDeviceGone(t *testing.T) {
 	_, swappedSys := buildFixture(t, swappedHostLayout())
 
 	t.Run("swapped", func(t *testing.T) {
+		// The fake swaps sysRoot, which the "unchanged" case must not inherit.
 		origSys := sysRoot
 		t.Cleanup(func() { sysRoot = origSys })
 		withOpenPCM(t, func(_, _ int) (pcm, error) {
@@ -416,16 +414,15 @@ func TestOpenDeviceChecksConfigBeforeDevice(t *testing.T) {
 		return nil, errShouldNotOpen
 	})
 	tests := []struct {
-		name  string
 		cfg   Config
 		field string
 	}{
-		{"rate", Config{Rate: 0, Channels: 1, Format: FormatS16LE}, "rate"},
-		{"channels", Config{Rate: 48000, Channels: 0, Format: FormatS16LE}, fieldChannels},
-		{"format", Config{Rate: 48000, Channels: 1, Format: Format(99)}, fieldFormat},
+		{Config{Rate: 0, Channels: 1, Format: FormatS16LE}, "rate"},
+		{Config{Rate: 48000, Channels: 0, Format: FormatS16LE}, "channels"},
+		{Config{Rate: 48000, Channels: 1, Format: Format(99)}, fieldFormat},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.field, func(t *testing.T) {
 			// The DeviceInfo is also invalid (empty), so a config-first order is
 			// the only way to see the config error.
 			_, err := OpenDevice(DeviceInfo{}, tt.cfg)
@@ -479,7 +476,7 @@ func mustDevices(t *testing.T) []DeviceInfo {
 func TestOpenDeviceReportsDeviceInfoID(t *testing.T) {
 	useFixture(t, hostLayout())
 	d := mustResolve(t, wantSerialID)
-	card, _, _ := recordOpen(t)
+	card, _ := recordOpen(t)
 	cfg := odCfg
 	cfg.Device = "hw:9,9"
 	s, err := OpenDevice(d, cfg)

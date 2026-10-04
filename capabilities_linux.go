@@ -95,10 +95,8 @@ func openQuery(r resolved) (ratePCM, error) {
 		// Attribute the failure to the card only once it is shown to be the unit
 		// that was asked for: a busy card that took over the index of an unplugged
 		// one must read as the device being gone, not as busy (retry later).
-		if r.verifyID != "" {
-			if verr := verifyCardIdentity(r); verr != nil {
-				return nil, verr
-			}
+		if verr := verifyCardIdentity(r); verr != nil {
+			return nil, verr
 		}
 		return nil, translateQueryError(err)
 	}
