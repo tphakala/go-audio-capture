@@ -195,7 +195,8 @@ func (e *BadFormatError) Error() string {
 // near the requested ones, at a rate, channel count and format that the device
 // advertised. Rate, PeriodFrames and Periods are the values the commit was
 // attempted with (or the requested ones when no nearby value could be pinned);
-// Err is the driver's error (HW_PARAMS on Linux).
+// Err is the driver's error (on Linux HW_PARAMS for a refused commit, HW_REFINE
+// when no nearby value could be pinned).
 //
 // Some USB devices only reveal at the commit that they cannot deliver a rate they
 // advertised, and then fail here rather than with *BadRateError. If trying other

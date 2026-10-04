@@ -105,7 +105,8 @@ func (e *BadFormatError) Error() string {
 // near the requested ones at a rate, format and channel count that passed
 // HW_REFINE. Rate, PeriodFrames and Periods are the values the commit was
 // attempted with (or the requested ones when no nearby value could be pinned);
-// Err is the driver's error.
+// Err is the driver's error (HW_PARAMS for a refused commit, HW_REFINE when no
+// nearby value could be pinned).
 type GeometryError struct {
 	Rate         int
 	PeriodFrames int
@@ -640,7 +641,7 @@ func (p *PCM) refineNear(hw *HwParams, param int, target uint32) error {
 		return *c.interval(param), !c.IntervalEmpty(param), nil
 	}
 
-	last := error(unix.EINVAL)
+	last := error(&ioctlError{Op: "HW_REFINE", Err: unix.EINVAL})
 	try := func(v uint32) (bool, error) {
 		ok, err := pin(v)
 		if err != nil && errors.Is(err, unix.EINVAL) {

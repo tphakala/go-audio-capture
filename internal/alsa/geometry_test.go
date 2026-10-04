@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math/bits"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -77,6 +78,9 @@ type fakeStepDevice struct {
 	// that the device reports with openmin set even when the caller asked for an
 	// integer interval (a hostile driver, to cover the defensive +1/-1 path).
 	periodsExcludeMin bool
+	// periodsExcludeMax is the mirror image: the highest periods value is an
+	// excluded open bound, reported with openmax set.
+	periodsExcludeMax bool
 	stepBytes         uint32 // period bytes must be a multiple of this; 0 means no step
 	bufferMax         uint32 // buffer frames cap; 0 means none
 
@@ -144,6 +148,17 @@ func (d *fakeStepDevice) apply(hw *HwParams) error {
 			iv.Flags |= intervalOpenMin
 		}
 		if iv.Min == iv.Max && iv.Flags&intervalOpenMin != 0 {
+			iv.Flags |= intervalEmpty
+			return unix.EINVAL
+		}
+	}
+	if d.periodsExcludeMax {
+		iv := hw.interval(ParamPeriods)
+		if iv.Max >= d.periodsMax {
+			iv.Max = d.periodsMax
+			iv.Flags |= intervalOpenMax
+		}
+		if iv.Min == iv.Max && iv.Flags&intervalOpenMax != 0 {
 			iv.Flags |= intervalEmpty
 			return unix.EINVAL
 		}
@@ -245,6 +260,11 @@ func TestNegotiateNearestPeriodTable(t *testing.T) {
 			d.bufferMax = 896 * 3
 			return d
 		}, 880, 4, 896, 3},
+		{"excluded open upper bound is never chosen", func() *fakeStepDevice {
+			d := stepDevice44100()
+			d.periodsExcludeMax = true
+			return d
+		}, 880, 100, 896, 31},
 		{"excluded open lower bound is never chosen", func() *fakeStepDevice {
 			d := stepDevice44100()
 			d.periodsExcludeMin = true
@@ -433,6 +453,9 @@ func TestNegotiateNoAttainableGeometryIsGeometryError(t *testing.T) {
 	if ge.Rate != 48000 || ge.PeriodFrames != 960 || ge.Periods != 4 {
 		t.Errorf("GeometryError = %+v, want the requested 48000 Hz, 960 x 4", ge)
 	}
+	if !strings.Contains(err.Error(), "HW_REFINE") {
+		t.Errorf("error %q does not name the failing ioctl", err)
+	}
 }
 
 // fakeStatefulRateDevice adds the stream state to a rate-only device: a
@@ -603,4 +626,69 @@ func narrowDevice(arg unsafe.Pointer, rateLo, rateHi uint32) error {
 		return err
 	}
 	return narrowInterval(hw, ParamPeriods, 2, 32)
+}
+
+func TestNegotiateNoCandidateGeometryErrorNamesIoctl(t *testing.T) {
+	// The target is above the period range and the down probe is refused, so no
+	// candidate is ever pinned: the error still names the failing ioctl instead of
+	// a bare "invalid argument".
+	refines := 0
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		if req != iocHwRefine {
+			return nil
+		}
+		refines++
+		if refines > 2 {
+			return unix.EINVAL
+		}
+		return narrowDevice(arg, 8000, 192000)
+	}
+	_, err := newPCM(-1, fake).Negotiate(48000, 2, FormatS16LE, 100000, 4)
+	if _, ok := errors.AsType[*GeometryError](err); !ok {
+		t.Fatalf("Negotiate err = %v, want *GeometryError", err)
+	}
+	if !strings.Contains(err.Error(), "HW_REFINE") {
+		t.Errorf("error %q does not name the failing ioctl", err)
+	}
+}
+
+func TestVerifyRateRefusedGeometryIsNotSupported(t *testing.T) {
+	// No value near the period target can be pinned: VerifyRate reports the rate
+	// as unsupported (false, nil) rather than returning the geometry error, so one
+	// unattainable candidate does not abort SupportedRatesVerified.
+	fake := func(_ int, req uintptr, arg unsafe.Pointer) error {
+		if req != iocHwRefine {
+			return nil
+		}
+		hw := (*HwParams)(arg)
+		if lo, hi := hw.Interval(ParamPeriodSize); lo == hi {
+			return unix.EINVAL
+		}
+		return narrowDevice(arg, 8000, 192000)
+	}
+	ok, err := newPCM(-1, fake).VerifyRate(2, FormatS16LE, 48000)
+	if err != nil || ok {
+		t.Fatalf("VerifyRate = %v, %v; want false, nil", ok, err)
+	}
+}
+
+func TestNegotiateCommitRefusalReportsChosenGeometry(t *testing.T) {
+	// HW_PARAMS refuses after the step rule moved the 882-frame target to 896:
+	// GeometryError carries the geometry the commit was attempted with, not the
+	// requested one.
+	d := stepDevice44100()
+	fake := func(fd int, req uintptr, arg unsafe.Pointer) error {
+		if req == iocHwParams {
+			return unix.EINVAL
+		}
+		return d.ioctl(fd, req, arg)
+	}
+	_, err := newPCM(-1, fake).Negotiate(44100, 2, FormatS16LE, 882, 4)
+	ge, ok := errors.AsType[*GeometryError](err)
+	if !ok {
+		t.Fatalf("Negotiate err = %v, want *GeometryError", err)
+	}
+	if ge.PeriodFrames != 896 || ge.Periods != 4 {
+		t.Errorf("GeometryError = %+v, want the attempted 896 x 4", ge)
+	}
 }
