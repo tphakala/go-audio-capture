@@ -5,6 +5,7 @@ package capture
 import (
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -27,6 +28,11 @@ type fakeRatePCM struct {
 	verifiable map[int]bool
 	verifyErr  error
 	gotVerify  []int
+	// probeFn is the result of Probe when set; nil means the device answers.
+	// events logs "probe" and "close" in call order.
+	probeFn func() error
+	probes  int
+	events  []string
 }
 
 func (f *fakeRatePCM) SupportedRates(channels int, format uint32, candidates []int) (rates []int, lo, hi int, err error) {
@@ -46,7 +52,20 @@ func (f *fakeRatePCM) VerifyRate(_ int, _ uint32, rate int) (bool, error) {
 // (value, error) contract without tripping the nilnil linter.
 var errShouldNotOpen = errors.New("open should not be reached")
 
-func (f *fakeRatePCM) Close() error { f.closeCalls++; return nil }
+func (f *fakeRatePCM) Probe() error {
+	f.probes++
+	f.events = append(f.events, "probe")
+	if f.probeFn != nil {
+		return f.probeFn()
+	}
+	return nil
+}
+
+func (f *fakeRatePCM) Close() error {
+	f.closeCalls++
+	f.events = append(f.events, "close")
+	return nil
+}
 
 // withOpenRatePCM swaps the seam for the duration of a test.
 func withOpenRatePCM(t *testing.T, fn func(card, device int) (ratePCM, error)) {
@@ -138,6 +157,9 @@ func TestSupportedRatesVerifiedSurfacesVerifyError(t *testing.T) {
 	if !errors.Is(err, ErrDeviceGone) {
 		t.Fatalf("err = %v, want ErrDeviceGone", err)
 	}
+	if fake.probes != 0 {
+		t.Errorf("probes = %d, want 0 (ENODEV maps without a probe)", fake.probes)
+	}
 }
 
 func TestSupportedRatesVerifiedPropagatesRefinePassError(t *testing.T) {
@@ -219,6 +241,62 @@ func TestSupportedRatesSurfacesProbeError(t *testing.T) {
 	}
 	if fake.closeCalls != 1 {
 		t.Errorf("Close called %d times, want 1 even on probe error", fake.closeCalls)
+	}
+	if fake.probes != 0 {
+		t.Errorf("probes = %d, want 0 (only EBADFD is probed)", fake.probes)
+	}
+}
+
+// TestSupportedRatesEBADFDIsProbed pins that an EBADFD from any post-open
+// ioctl of a capability query is classified by one PVERSION probe, run before
+// the query's deferred Close (a probe on a closed PCM fails with EBADF and
+// would read as a present device).
+func TestSupportedRatesEBADFDIsProbed(t *testing.T) {
+	ebadfd := &wrappedErrnoError{unix.EBADFD}
+	paths := []struct {
+		name string
+		fake func() *fakeRatePCM
+		call func() (RateSupport, error)
+	}{
+		{"SupportedRates refine", func() *fakeRatePCM { return &fakeRatePCM{ratesErr: ebadfd} },
+			func() (RateSupport, error) { return SupportedRates("hw:0,0", 1, FormatS32LE) }},
+		{"SupportedRatesVerified refine", func() *fakeRatePCM { return &fakeRatePCM{ratesErr: ebadfd} },
+			func() (RateSupport, error) { return SupportedRatesVerified("hw:0,0", 1, FormatS32LE) }},
+		{"SupportedRatesVerified commit", func() *fakeRatePCM {
+			return &fakeRatePCM{rates: []int{48000}, lo: 48000, hi: 48000, verifyErr: ebadfd}
+		}, func() (RateSupport, error) { return SupportedRatesVerified("hw:0,0", 1, FormatS32LE) }},
+	}
+	probes := []struct {
+		name     string
+		probeFn  func() error
+		wantGone bool
+	}{
+		{"probe ENODEV", func() error { return unix.ENODEV }, true},
+		{"probe EBADFD", func() error { return unix.EBADFD }, true},
+		{"probe answers", nil, false},
+	}
+	for _, p := range paths {
+		for _, pr := range probes {
+			t.Run(p.name+"/"+pr.name, func(t *testing.T) {
+				fake := p.fake()
+				fake.probeFn = pr.probeFn
+				withOpenRatePCM(t, func(int, int) (ratePCM, error) { return fake, nil })
+				_, err := p.call()
+				if pr.wantGone {
+					if !errors.Is(err, ErrDeviceGone) {
+						t.Errorf("err = %v, want ErrDeviceGone", err)
+					}
+				} else if !errors.Is(err, unix.EBADFD) || errors.Is(err, ErrDeviceGone) {
+					t.Errorf("err = %v, want the original EBADFD, not ErrDeviceGone", err)
+				}
+				if fake.probes != 1 || fake.closeCalls != 1 {
+					t.Errorf("probes = %d, Close calls = %d, want 1 each", fake.probes, fake.closeCalls)
+				}
+				if !slices.Equal(fake.events, []string{"probe", "close"}) {
+					t.Errorf("events = %v, want probe before close", fake.events)
+				}
+			})
+		}
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 type ratePCM interface {
 	SupportedRates(channels int, format uint32, candidates []int) ([]int, int, int, error)
 	VerifyRate(channels int, format uint32, rate int) (bool, error)
+	Probe() error
 	Close() error
 }
 
@@ -44,13 +45,14 @@ var standardRates = []int{
 // START, so it does not move the device out of its current state.
 //
 // If the device is held exclusively by another process the open itself fails
-// and the returned error is ErrDeviceInUse; a missing or removed device yields
-// ErrDeviceGone; a channel count or format the device does not support at any
-// rate yields *BadFormatError, which carries the channel range the device does
-// accept for the format. Resolving the device id can also fail before any
-// open, with *BadDeviceError for a malformed id, *DeviceNotFoundError (which
-// unwraps to ErrDeviceGone) when a stable id matches nothing present, or
-// *AmbiguousDeviceError when it matches more than one. In the ErrDeviceInUse and
+// and the returned error is ErrDeviceInUse; a missing device, or one removed
+// during the query, yields ErrDeviceGone; a channel count or format the device
+// does not support at any rate yields *BadFormatError, which carries the
+// channel range the device does accept for the format. Resolving the device
+// id can also fail before any open, with *BadDeviceError for a malformed id,
+// *DeviceNotFoundError (which unwraps to ErrDeviceGone) when a stable id
+// matches nothing present, or *AmbiguousDeviceError when it matches more than
+// one. In the ErrDeviceInUse and
 // ErrDeviceGone cases the caller should fall back to a static rate list rather
 // than treating the query as authoritative.
 func SupportedRates(device string, channels int, format Format) (RateSupport, error) {
@@ -102,6 +104,8 @@ func openQuery(r resolved) (ratePCM, error) {
 // queryRates runs the HW_REFINE pass on an open device. It derives the ALSA
 // format from format itself rather than taking a separate af argument, so the
 // value fed to the ioctl and the one named in a BadFormatError cannot disagree.
+// A refine error is classified by queryError, so it must run before the caller
+// closes p.
 func queryRates(p ratePCM, channels int, format Format) (RateSupport, error) {
 	af, err := alsaFormat(format)
 	if err != nil {
@@ -115,7 +119,7 @@ func queryRates(p ratePCM, channels int, format Format) (RateSupport, error) {
 		if abfe, ok := errors.AsType[*alsa.BadFormatError](err); ok {
 			return RateSupport{}, &BadFormatError{Channels: channels, Format: format, MinChannels: abfe.MinChannels, MaxChannels: abfe.MaxChannels}
 		}
-		return RateSupport{}, translateQueryError(err)
+		return RateSupport{}, queryError(p, err)
 	}
 	return RateSupport{Rates: rates, Min: lo, Max: hi}, nil
 }
@@ -141,7 +145,8 @@ func queryRates(p ratePCM, channels int, format Format) (RateSupport, error) {
 // is meant for occasional capability discovery, not a hot path. The open is
 // non-blocking (alsa.OpenPCM, like every query here) so it never waits on a busy
 // device. Errors map exactly as SupportedRates: a busy or missing device yields
-// ErrDeviceInUse / ErrDeviceGone and the caller should fall back to a static
+// ErrDeviceInUse / ErrDeviceGone (a device removed during the HW_REFINE or
+// HW_PARAMS passes included) and the caller should fall back to a static
 // list.
 func SupportedRatesVerified(device string, channels int, format Format) (RateSupport, error) {
 	r, err := prepareQuery(device, channels, format)
@@ -173,7 +178,7 @@ func SupportedRatesVerified(device string, channels int, format Format) (RateSup
 	for _, rate := range rs.Rates {
 		ok, verr := p.VerifyRate(channels, af, rate)
 		if verr != nil {
-			return RateSupport{}, translateQueryError(verr)
+			return RateSupport{}, queryError(p, verr)
 		}
 		if ok {
 			verified = append(verified, rate)
@@ -182,9 +187,23 @@ func SupportedRatesVerified(device string, channels int, format Format) (RateSup
 	return RateSupport{Rates: verified, Min: rs.Min, Max: rs.Max}, nil
 }
 
+// queryError classifies an error from an ioctl on an open query fd. EBADFD
+// means the PCM left the state the ioctl needs; as in Open, Start and Read,
+// one PVERSION probe tells a device removed mid-query (ErrDeviceGone) from an
+// ordinary state error, which is returned unchanged. It must run before the
+// query's deferred Close: a probe on a closed PCM fails with EBADF and would
+// not read as gone.
+func queryError(p prober, err error) error {
+	if errors.Is(err, unix.EBADFD) && deviceDisconnected(p) {
+		return ErrDeviceGone
+	}
+	return translateQueryError(err)
+}
+
 // translateQueryError maps the raw errnos a capability query can hit onto the
 // package's typed errors, so callers never import internal/alsa or match bare
-// errnos. Anything else is returned unchanged.
+// errnos. It is the mapping for when there is no fd to probe (a failed open);
+// queryError adds the EBADFD probe. Anything else is returned unchanged.
 func translateQueryError(err error) error {
 	switch {
 	case errors.Is(err, unix.EBUSY):

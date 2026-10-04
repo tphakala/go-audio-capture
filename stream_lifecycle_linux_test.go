@@ -94,6 +94,12 @@ func runReads(t *testing.T, reads [][]error, wantFail bool, wantRec int, wantXru
 		if err != nil || n != 480 {
 			t.Fatalf("read %d (%d errs): = %d, %v; want 480, nil", i, len(errs), n, err)
 		}
+		if fp.probes != 0 {
+			t.Fatalf("read %d: probes = %d, want 0 (the probe runs only at the cap)", i, fp.probes)
+		}
+	}
+	if wantFail && fp.probes != 1 {
+		t.Errorf("probes = %d, want 1 at the cap", fp.probes)
 	}
 	if s.Xruns() != wantXruns || uint64(len(recovered)) != wantXruns {
 		t.Errorf("Xruns = %d, Recover calls = %d, want %d each", s.Xruns(), len(recovered), wantXruns)
@@ -282,24 +288,145 @@ func TestOpenNegotiateEBADFDPresentDevice(t *testing.T) {
 }
 
 // TestReadUnrecoverableAfterRecoveriesIsClassified pins that the recovery
-// budget counts only errnos Recover can handle: an unplug (ENODEV) arriving as
-// the ninth failure in one gap is ErrDeviceGone, not a stall.
+// budget counts only errnos Recover can handle: a ninth failure in one gap that
+// is not recoverable is classified at once (ErrDeviceGone for an unplug, the raw
+// errno otherwise), never reported as a stall.
 func TestReadUnrecoverableAfterRecoveriesIsClassified(t *testing.T) {
-	errs := append(slices.Repeat([]error{unix.EPIPE}, maxRecoveriesWithoutData), unix.ENODEV)
+	cases := []struct {
+		name      string
+		last      error
+		probeFn   func() error
+		wantProbe int
+		check     func(t *testing.T, err error)
+	}{
+		{"ENODEV", unix.ENODEV, nil, 0, func(t *testing.T, err error) {
+			t.Helper()
+			if !errors.Is(err, ErrDeviceGone) || errors.Is(err, ErrDeviceStalled) {
+				t.Errorf("Read = %v, want ErrDeviceGone", err)
+			}
+		}},
+		{"EINVAL is returned raw", unix.EINVAL, nil, 0, func(t *testing.T, err error) {
+			t.Helper()
+			if !errors.Is(err, unix.EINVAL) || errors.Is(err, ErrDeviceGone) || errors.Is(err, ErrClosed) {
+				t.Errorf("Read = %v, want the raw EINVAL", err)
+			}
+			if _, ok := errors.AsType[*StallError](err); ok {
+				t.Errorf("Read = %v, want no *StallError", err)
+			}
+		}},
+		{"EBADFD with probe ENODEV", &recoverError{unix.EBADFD}, func() error { return unix.ENODEV }, 1, func(t *testing.T, err error) {
+			t.Helper()
+			if !errors.Is(err, ErrDeviceGone) || errors.Is(err, ErrDeviceStalled) {
+				t.Errorf("Read = %v, want ErrDeviceGone", err)
+			}
+		}},
+		{"EBADFD with probe answering", &recoverError{unix.EBADFD}, nil, 1, func(t *testing.T, err error) {
+			t.Helper()
+			if !errors.Is(err, unix.EBADFD) || errors.Is(err, ErrDeviceGone) || errors.Is(err, ErrDeviceStalled) {
+				t.Errorf("Read = %v, want the raw EBADFD", err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := append(slices.Repeat([]error{unix.EPIPE}, maxRecoveriesWithoutData), tc.last)
+			var recovered []error
+			fp := &fakePCM{recoverFn: okRecover(&recovered), probeFn: tc.probeFn}
+			fp.readFn = guardedRead(func(call int) (int, error) {
+				if call <= len(errs) {
+					return 0, errs[call-1]
+				}
+				return 480, nil
+			})
+			s := openLifecycleStream(t, fp)
+			_, err := s.Read(make([]byte, 96))
+			tc.check(t, err)
+			if len(recovered) != maxRecoveriesWithoutData {
+				t.Errorf("Recover calls = %d, want %d", len(recovered), maxRecoveriesWithoutData)
+			}
+			if fp.probes != tc.wantProbe {
+				t.Errorf("probes = %d, want %d", fp.probes, tc.wantProbe)
+			}
+		})
+	}
+}
+
+// TestReadRecoveryCapProbesForDeviceGone pins that a Read reaching its recovery
+// cap probes once: a device found gone is ErrDeviceGone, one not found gone
+// keeps the *StallError, and the probe is not a recovery.
+func TestReadRecoveryCapProbesForDeviceGone(t *testing.T) {
+	triggers := []struct {
+		name     string
+		errs     []error
+		wantRec  int // Recover calls
+		wantRecs int // StallError.Recoveries
+	}{
+		{"9 x EPIPE", slices.Repeat([]error{unix.EPIPE}, maxRecoveriesWithoutData+1), 8, 8},
+		{"EIO, EIO", []error{unix.EIO, unix.EIO}, 1, 1},
+		{"EIO, EPIPE, EIO", []error{unix.EIO, unix.EPIPE, unix.EIO}, 2, 2},
+		{"9 x ESTRPIPE", slices.Repeat([]error{unix.ESTRPIPE}, maxRecoveriesWithoutData+1), 8, 8},
+	}
+	probes := []struct {
+		name     string
+		probeFn  func() error
+		wantGone bool
+	}{
+		{"probe ENODEV", func() error { return unix.ENODEV }, true},
+		{"probe EBADFD", func() error { return &recoverError{unix.EBADFD} }, true},
+		{"probe answers", nil, false},
+		{"probe EIO", func() error { return unix.EIO }, false},
+	}
+	for _, tr := range triggers {
+		for _, pr := range probes {
+			t.Run(tr.name+"/"+pr.name, func(t *testing.T) {
+				var recovered []error
+				fp := &fakePCM{recoverFn: okRecover(&recovered), probeFn: pr.probeFn}
+				fp.readFn = guardedRead(func(call int) (int, error) {
+					if call <= len(tr.errs) {
+						return 0, tr.errs[call-1]
+					}
+					return 480, nil
+				})
+				s := openLifecycleStream(t, fp)
+				_, err := s.Read(make([]byte, 96))
+				if pr.wantGone {
+					if !errors.Is(err, ErrDeviceGone) || errors.Is(err, ErrDeviceStalled) {
+						t.Errorf("Read = %v, want ErrDeviceGone", err)
+					}
+				} else {
+					se, ok := errors.AsType[*StallError](err)
+					if !ok || !errors.Is(err, ErrDeviceStalled) || errors.Is(err, ErrDeviceGone) {
+						t.Fatalf("Read = %v, want *StallError", err)
+					}
+					if se.Recoveries != tr.wantRecs {
+						t.Errorf("Recoveries = %d, want %d", se.Recoveries, tr.wantRecs)
+					}
+				}
+				if fp.probes != 1 {
+					t.Errorf("probes = %d, want 1", fp.probes)
+				}
+				if len(recovered) != tr.wantRec {
+					t.Errorf("Recover calls = %d, want %d", len(recovered), tr.wantRec)
+				}
+			})
+		}
+	}
+}
+
+// TestReadRecoveryCapCloseDuringProbeIsErrClosed pins that a Close racing the
+// cap's probe wins: the probe fails with EBADF (acquire on a closed PCM) and the
+// Read returns ErrClosed, not a stall.
+func TestReadRecoveryCapCloseDuringProbeIsErrClosed(t *testing.T) {
 	var recovered []error
 	fp := &fakePCM{recoverFn: okRecover(&recovered)}
-	fp.readFn = guardedRead(func(call int) (int, error) {
-		if call <= len(errs) {
-			return 0, errs[call-1]
-		}
-		return 480, nil
-	})
+	fp.readFn = guardedRead(func(int) (int, error) { return 0, unix.EPIPE })
 	s := openLifecycleStream(t, fp)
-	_, err := s.Read(make([]byte, 96))
-	if !errors.Is(err, ErrDeviceGone) || errors.Is(err, ErrDeviceStalled) {
-		t.Errorf("Read = %v, want ErrDeviceGone", err)
+	fp.probeFn = func() error {
+		_ = s.Close()
+		return unix.EBADF
 	}
-	if len(recovered) != maxRecoveriesWithoutData {
-		t.Errorf("Recover calls = %d, want %d", len(recovered), maxRecoveriesWithoutData)
+	_, err := s.Read(make([]byte, 96))
+	if !errors.Is(err, ErrClosed) || errors.Is(err, ErrDeviceStalled) {
+		t.Errorf("Read = %v, want ErrClosed", err)
 	}
 }

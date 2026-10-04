@@ -159,14 +159,15 @@ func (s *Stream) Start() error {
 // system suspend is resumed, and a stalled stream (EIO, the kernel's read
 // timeout) gets one restart. Recovery is bounded per call: a second stall, or
 // more than a handful of recoveries without any frames being delivered, returns
-// a *StallError (which unwraps to ErrDeviceStalled and to the last errno). Read
-// returns ErrClosed when the stream is closed and ErrDeviceGone when the device
-// disappears (e.g. a USB capture device unplugged mid-stream, including while
-// Read is parked in the driver); any other unrecoverable error is returned
-// unchanged. Any returned error leaves the stream unusable (a short read, fewer
-// frames than requested, is not an error and returns a nil error): the caller
-// must Close it (Read does not release the device fd on its own) and, to resume,
-// Open a new stream.
+// a *StallError (which unwraps to ErrDeviceStalled and to the last errno); if
+// one PVERSION probe at that point finds the device gone, it returns
+// ErrDeviceGone instead. Read returns ErrClosed when the stream is closed and
+// ErrDeviceGone when the device disappears (e.g. a USB capture device
+// unplugged mid-stream, including while Read is parked in the driver); any
+// other unrecoverable error is returned unchanged. Any returned error leaves
+// the stream unusable (a short read, fewer frames than requested, is not an
+// error and returns a nil error): the caller must Close it (Read does not
+// release the device fd on its own) and, to resume, Open a new stream.
 func (s *Stream) Read(buf []byte) (int, error) {
 	if s.closed.Load() {
 		return 0, ErrClosed
@@ -188,7 +189,7 @@ func (s *Stream) Read(buf []byte) (int, error) {
 		}
 		stall := errors.Is(err, unix.EIO)
 		if recoveries == maxRecoveriesWithoutData || (stall && stalls == maxStallRestarts) {
-			return 0, &StallError{Recoveries: recoveries, Err: err}
+			return 0, s.stallError(recoveries, err)
 		}
 		if stall {
 			stalls++
@@ -231,10 +232,32 @@ func (s *Stream) terminalError(err error) error {
 	return err
 }
 
+// stallError builds the error for a Read that exhausted its recovery budget.
+// A USB device can die during a burst of overruns or stalls without
+// READI_FRAMES ever returning ENODEV or EBADFD, so one PVERSION probe tells a
+// vanished device (ErrDeviceGone, retire it) from one the probe did not find
+// gone (*StallError, reopen it). s.closed is checked after the probe:
+// a Close racing it fails the probe with EBADF, and a Close always wins.
+func (s *Stream) stallError(recoveries int, err error) error {
+	gone := deviceDisconnected(s.pcm)
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	if gone {
+		return ErrDeviceGone
+	}
+	return &StallError{Recoveries: recoveries, Err: err}
+}
+
+// prober is the one method deviceDisconnected needs; both the stream seam (pcm)
+// and the capability-query seam (ratePCM) satisfy it.
+type prober interface{ Probe() error }
+
 // deviceDisconnected reports whether a PVERSION probe shows the device gone:
 // ENODEV/ENXIO/ENOENT (the card's file operations were shut down) or EBADFD (the
 // PCM alone is DISCONNECTED). EBADF (closed) and success are not disconnects.
-func deviceDisconnected(p pcm) bool {
+// p is either seam (a Stream's pcm or a query's ratePCM).
+func deviceDisconnected(p prober) bool {
 	perr := p.Probe()
 	return perr != nil && (alsa.IsDeviceGone(perr) || errors.Is(perr, unix.EBADFD))
 }
@@ -243,9 +266,13 @@ func deviceDisconnected(p pcm) bool {
 // overruns, resumes after a system suspend, and restarted stalls.
 func (s *Stream) Xruns() uint64 { return s.xruns.Load() }
 
-// Close stops and closes the stream. It is idempotent and unblocks a Read
-// currently parked in the driver. It blocks until that in-flight Read has
-// returned, so the device fd is never closed out from under a live read.
+// Close stops and closes the stream. It is idempotent and may be called from
+// another goroutine: it wakes a Read parked in the driver, which then returns
+// ErrClosed, and waits for any ioctl already in flight on the device to finish
+// before releasing the fd, so the fd is never closed under a live ioctl. It does
+// not wait for Read itself to return: a Read between ioctls (for example waiting
+// between RESUME retries after a system suspend) sees the closed stream at its
+// next ioctl and returns ErrClosed.
 func (s *Stream) Close() error {
 	if s.closed.Swap(true) {
 		return nil
