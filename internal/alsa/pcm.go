@@ -104,8 +104,9 @@ func (e *BadFormatError) Error() string {
 // GeometryError reports that the device refused every period size and count
 // near the requested ones at a rate, format and channel count that passed
 // HW_REFINE. Rate, PeriodFrames and Periods are the values the commit was
-// attempted with (or the requested ones when no nearby value could be pinned);
-// Err is the driver's error (HW_PARAMS for a refused commit, HW_REFINE when no
+// attempted with; when no nearby value could be pinned they are the requested
+// ones, except PeriodFrames, which keeps a period size already chosen when only
+// the period count failed. Err is the driver's error (HW_PARAMS for a refused commit, HW_REFINE when no
 // nearby value could be pinned).
 type GeometryError struct {
 	Rate         int
@@ -561,7 +562,8 @@ func (p *PCM) refineAll(hw *HwParams) error {
 // bounds can still be refused; refineNear asks the kernel instead of guessing.
 // Rate, channels and format never move (no conversion). It returns
 // errRateRefused when the rate pin is rejected, and *GeometryError when no value
-// near the period size or count can be pinned. Negotiate and VerifyRate share it,
+// near the period size or count can be pinned; that error carries the period
+// size already chosen when only the period count fails. Negotiate and VerifyRate share it,
 // so the probe and the open agree for the default geometry. It assumes hw has
 // been refined for the target access/format/channels.
 func (p *PCM) refineGeometry(hw *HwParams, rate, periodFrames, periods int) error {
@@ -576,16 +578,22 @@ func (p *PCM) refineGeometry(hw *HwParams, rate, periodFrames, periods int) erro
 		return errRateRefused
 	}
 	// Period count rather than buffer size second, because Config.Periods is what
-	// callers set.
+	// callers set. chosenFrames tracks the period size the first step pinned, so
+	// a period-count failure reports the geometry actually attempted.
+	chosenFrames := periodFrames
 	for _, step := range []struct {
 		param  int
 		target int
 	}{{ParamPeriodSize, periodFrames}, {ParamPeriods, periods}} {
 		if err := p.refineNear(hw, step.param, uint32(step.target)); err != nil {
 			if nn, ok := errors.AsType[*noNearError](err); ok {
-				return &GeometryError{Rate: rate, PeriodFrames: periodFrames, Periods: periods, Err: nn.err}
+				return &GeometryError{Rate: rate, PeriodFrames: chosenFrames, Periods: periods, Err: nn.err}
 			}
 			return err
+		}
+		if step.param == ParamPeriodSize {
+			lo, _ := hw.Interval(ParamPeriodSize)
+			chosenFrames = int(lo)
 		}
 	}
 	return nil

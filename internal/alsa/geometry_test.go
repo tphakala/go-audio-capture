@@ -692,3 +692,26 @@ func TestNegotiateCommitRefusalReportsChosenGeometry(t *testing.T) {
 		t.Errorf("GeometryError = %+v, want the attempted 896 x 4", ge)
 	}
 }
+
+func TestNegotiatePeriodsRefusalReportsChosenPeriodSize(t *testing.T) {
+	// The step rule moves the 882-frame target to 896, then every period-count
+	// pin is refused: GeometryError carries the 896 the period-size step already
+	// chose, not the requested 882.
+	d := stepDevice44100()
+	fake := func(fd int, req uintptr, arg unsafe.Pointer) error {
+		if req == iocHwRefine {
+			if lo, hi := (*HwParams)(arg).Interval(ParamPeriods); lo == hi {
+				return unix.EINVAL
+			}
+		}
+		return d.ioctl(fd, req, arg)
+	}
+	_, err := newPCM(-1, fake).Negotiate(44100, 2, FormatS16LE, 882, 4)
+	ge, ok := errors.AsType[*GeometryError](err)
+	if !ok {
+		t.Fatalf("Negotiate err = %v, want *GeometryError", err)
+	}
+	if ge.PeriodFrames != 896 || ge.Periods != 4 {
+		t.Errorf("GeometryError = %+v, want the chosen 896 frames with the requested 4 periods", ge)
+	}
+}
