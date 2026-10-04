@@ -111,13 +111,9 @@ func queryRates(p ratePCM, channels int, format Format) (RateSupport, error) {
 	if err != nil {
 		// The backend rejects this channel/format combo outright (not merely a
 		// rate): report it as a typed BadFormatError, with the channel range it
-		// accepts, rather than leaking the internal error. The EINVAL fallback
-		// covers a backend that returns the raw errno.
+		// accepts, rather than leaking the internal error.
 		if abfe, ok := errors.AsType[*alsa.BadFormatError](err); ok {
 			return RateSupport{}, &BadFormatError{Channels: channels, Format: format, MinChannels: abfe.MinChannels, MaxChannels: abfe.MaxChannels}
-		}
-		if errors.Is(err, unix.EINVAL) {
-			return RateSupport{}, &BadFormatError{Channels: channels, Format: format}
 		}
 		return RateSupport{}, translateQueryError(err)
 	}

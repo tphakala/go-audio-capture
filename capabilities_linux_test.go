@@ -212,21 +212,6 @@ func TestSupportedRatesMapsMissingToDeviceGone(t *testing.T) {
 	}
 }
 
-func TestSupportedRatesMapsInvalidToBadFormat(t *testing.T) {
-	// EINVAL from the initial refine means the channel/format combo is rejected
-	// outright; it must surface as a typed *BadFormatError with Rate 0.
-	fake := &fakeRatePCM{ratesErr: &wrappedErrnoError{unix.EINVAL}}
-	withOpenRatePCM(t, func(int, int) (ratePCM, error) { return fake, nil })
-	_, err := SupportedRates("hw:0,0", 1, FormatS16LE)
-	var bfe *BadFormatError
-	if !errors.As(err, &bfe) {
-		t.Fatalf("err = %v, want *BadFormatError", err)
-	}
-	if bfe.Channels != 1 || bfe.Format != FormatS16LE || bfe.Rate != 0 {
-		t.Errorf("BadFormatError = %+v, want {Rate:0 Channels:1 Format:s16}", bfe)
-	}
-}
-
 func TestSupportedRatesSurfacesProbeError(t *testing.T) {
 	fake := &fakeRatePCM{ratesErr: &wrappedErrnoError{unix.ENOTTY}}
 	withOpenRatePCM(t, func(int, int) (ratePCM, error) { return fake, nil })
