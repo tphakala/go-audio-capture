@@ -66,8 +66,8 @@ type Stream struct {
 // fails at once rather than waiting for it to be released), and ErrDeviceGone
 // when the device is missing or was removed. A busy card that is no longer the
 // unit a stable id resolved to reports ErrDeviceGone, not ErrDeviceInUse. A
-// caller that already holds a DeviceInfo can use OpenDevice to skip the id
-// resolution.
+// caller that already holds a DeviceInfo can use OpenDevice, which usually
+// skips the id resolution.
 func Open(cfg Config) (*Stream, error) {
 	// Cheap, device-independent checks first, so an obviously invalid config is
 	// rejected before a /proc + /sys enumeration resolves the id. SupportedRates
@@ -85,9 +85,9 @@ func Open(cfg Config) (*Stream, error) {
 }
 
 // OpenDevice opens a DeviceInfo that Devices or Resolve returned in this process,
-// without resolving its id again. A caller that has just resolved a device (to
-// show it, or to check that it is present) avoids the second /proc + /sys
-// enumeration that Open performs.
+// in most cases without resolving its id again. A caller that has just resolved
+// a device (to show it, or to check that it is present) avoids the second /proc
+// + /sys enumeration that Open performs; the exception is described below.
 //
 // It opens d.Card and d.Device, then re-reads the card's identity from sysfs, so
 // a stable d.ID (and d.PortID, when set) must still name that card or OpenDevice

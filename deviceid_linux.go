@@ -405,7 +405,8 @@ type resolved struct {
 // /proc/asound cannot be read. A stable id is matched against the devices
 // present right now, on every call: caching the result would reintroduce the
 // very staleness the stable id exists to remove. resolveDeviceInfo is the one
-// path that skips this search, and it keeps the guarantee by having the caller
+// path that skips this search (except for a USB serial-form id with no PortID,
+// which it hands back here), and it keeps the guarantee by having the caller
 // verify the live sysfs identity after the open.
 func resolveForOpen(id string) (resolved, error) {
 	trimmed := strings.TrimSpace(id)
@@ -433,10 +434,12 @@ func resolveForOpen(id string) (resolved, error) {
 // verifyCardIdentity, which re-reads the card's identity from sysfs, so a stale
 // DeviceInfo fails instead of opening whatever holds the index now.
 //
-// It rejects a DeviceInfo whose fields disagree, so a zero value cannot open
-// hw:0,0 and a hand-built one cannot name one card with its ID and another with
-// Card, except in the one shape the post-open check cannot pin (below), whose
-// Card is ignored. That shape is a USB serial-form ID with no PortID, where
+// It rejects a DeviceInfo whose fields disagree in a way visible before the
+// open, so a zero value cannot open hw:0,0 and a numeric ID cannot name one card
+// while Card names another. A stable ID names no card index, so a wrong Card
+// beside it is caught only after the open, by verifyCardIdentity, as
+// ErrDeviceGone. In the one shape the post-open check cannot pin (below) Card is
+// ignored. That shape is a USB serial-form ID with no PortID, where
 // same-serial units are indistinguishable after the open; it is resolved by
 // search as Open does, which reports *AmbiguousDeviceError when twins are
 // present.

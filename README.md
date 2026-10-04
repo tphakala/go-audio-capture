@@ -101,7 +101,7 @@ The `hw:CARD=` form is only as unique as the kernel card id it carries. The kern
 
 The id falls back to `hw:N,D` with `IDStable` false whenever no stable form can be built: sysfs cannot be read (a container with a partial `/sys`), or a USB card reports no serial and no derivable port, or a non-USB card has no kernel card id. A false `IDStable` is the signal not to persist it.
 
-`Config.Device` accepts any of these, and still accepts a plain `hw:card,device` for interactive use. A stable id is resolved on every `Open`, `SupportedRates`, and `SupportedRatesVerified` call, never cached, and re-checked once more after the device is open, so a card swapped in the window between resolving and opening is caught rather than recorded. `OpenDevice` skips the search for a `DeviceInfo` you already hold, but not the check after the open. `Resolve` answers the same question without opening anything:
+`Config.Device` accepts any of these, and still accepts a plain `hw:card,device` for interactive use. A stable id is resolved on every `Open`, `SupportedRates`, and `SupportedRatesVerified` call, never cached, and re-checked once more after the device is open, so a card swapped in the window between resolving and opening is caught rather than recorded. `OpenDevice` skips the search for a `DeviceInfo` you already hold (except a USB serial-form `ID` with no `PortID`, see below), but not the check after the open. `Resolve` answers the same question without opening anything:
 
 ```go
 var amb *capture.AmbiguousDeviceError
@@ -118,7 +118,7 @@ case err == nil:
 }
 ```
 
-To open what `Resolve` returned without enumerating again, pass it to `OpenDevice`. On Linux it opens `d.Card` and `d.Device` directly and then re-reads the card's identity from sysfs (`ID`, and `PortID` when set), so a `DeviceInfo` that went stale fails with `ErrDeviceGone` instead of opening another unit; resolve again and retry. `Config.Device` is ignored, and `Negotiated().Device` reports `d.ID`. A `DeviceInfo` with `IDStable` false opens its `hw:N,D` address unverified, as `Open` does. A USB `ID` in the serial form with no `PortID` is resolved as `Open` would, because nothing read after the open can tell two units with one serial apart. Persist the `ID`, not the `DeviceInfo`: its `Card` is a current-boot index.
+To open what `Resolve` returned without enumerating again (with one exception, below), pass it to `OpenDevice`. On Linux it opens `d.Card` and `d.Device` directly and then re-reads the card's identity from sysfs (`ID`, and `PortID` when set), so a `DeviceInfo` that went stale fails with `ErrDeviceGone` instead of opening another unit; resolve again and retry. `Config.Device` is ignored, and `Negotiated().Device` reports `d.ID`. A `DeviceInfo` with `IDStable` false opens its `hw:N,D` address unverified, as `Open` does. A USB `ID` in the serial form with no `PortID` is resolved as `Open` would, because nothing read after the open can tell two units with one serial apart. Persist the `ID`, not the `DeviceInfo`: its `Card` is a current-boot index.
 
 ```go
 d, err := capture.Resolve(persistedID)

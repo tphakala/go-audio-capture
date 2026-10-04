@@ -50,9 +50,10 @@ func Open(cfg Config) (*Stream, error) {
 
 // OpenDevice opens the endpoint a DeviceInfo from Devices or Resolve names. On
 // Windows Open already resolves the endpoint id directly, without enumerating,
-// so this is Open with Config.Device set to d.ID; it exists so code written for
-// Linux, where it skips an enumeration, can open what Resolve returned on both
-// platforms. Config.Device is ignored and Negotiated reports d.ID as the device.
+// so this is Open with Config.Device set to d.ID; it exists so code written
+// for Linux, where it usually skips an enumeration, can open what Resolve
+// returned on both platforms. Config.Device is ignored and Negotiated reports
+// d.ID as the device.
 // An empty d.ID is a *ConfigError (field "device") rather than the default
 // endpoint, because Resolve returns the concrete endpoint id; use Open with ""
 // or "default" for the default endpoint.
