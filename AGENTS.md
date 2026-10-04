@@ -26,6 +26,12 @@ The target is any USB Audio Class capture device, from low-cost USB sound cards 
 
 Validated on real hardware so far: 384 kHz AudioMoth (ultrasonic), ZOOM AMS-24, Focusrite Scarlett Solo 4th Gen, and the `snd-aloop` loopback on Linux (amd64, arm64 on a Raspberry Pi 4, and 32-bit builds); Sound Blaster ZxR and Solid State Logic SSL 2 MkII on Windows.
 
+### API stability
+
+The public API is not stable before v1.0.0. Exported types, functions, struct fields and error types may change in any v0.x release when a cleaner design calls for it, and such a change ships as a minor version bump with a note in the release. Prefer the better API over compatibility: do not add deprecated aliases, compatibility shims or wrapper functions to keep an old signature working, and do not bend a design to avoid a breaking change. A changed signature still needs every caller in this repo updated, and a changed error type needs the failure-mode table, README and godoc updated with it.
+
+The design rules below are not part of this: they are the library's contract and hold across every release.
+
 ## Design rules you must not break
 
 These are the reason the library exists. A change that violates one is wrong even if tests pass.
@@ -176,6 +182,7 @@ Intentional, do not flag:
 - Magic numbers in `internal/alsa` and `internal/wasapi` that mirror kernel or Windows headers.
 - The absence of resampling, channel mixing or format conversion helpers.
 - Typed errors that duplicate their internal counterparts (`alsa.BadRateError` and `capture.BadRateError`); the root package keeps callers from importing internal packages.
+- Breaking changes to the exported API before v1.0.0 (see API stability), and the absence of deprecated aliases or shims for the old form.
 
 ## Things that do not belong in the repo
 
