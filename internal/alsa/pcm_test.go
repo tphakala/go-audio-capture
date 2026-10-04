@@ -481,8 +481,7 @@ func TestCloseConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
 	for i := range errs {
-		wg.Add(1)
-		go func(i int) { defer wg.Done(); errs[i] = p.Close() }(i)
+		wg.Go(func() { errs[i] = p.Close() })
 	}
 	wg.Wait()
 	for i, err := range errs {

@@ -142,8 +142,7 @@ func warmCarry(tb testing.TB, c *Client, buf []byte) {
 func BenchmarkFillSteadyState(b *testing.B) {
 	c, buf := benchClient(480, 480)
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, _, err := c.fill(buf); err != nil {
 			b.Fatal(err)
 		}
@@ -155,8 +154,7 @@ func BenchmarkFillSteadyState(b *testing.B) {
 func BenchmarkFillOverflow(b *testing.B) {
 	c, buf := benchClient(480, 240)
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, _, err := c.fill(buf); err != nil {
 			b.Fatal(err)
 		}
