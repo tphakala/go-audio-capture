@@ -436,10 +436,11 @@ func resolveForOpen(id string) (resolved, error) {
 //
 // It rejects a DeviceInfo whose fields disagree, so a zero value cannot open
 // hw:0,0 and a hand-built one cannot name one card with its ID and another with
-// Card. The one shape the post-open check cannot pin is a USB serial-form ID
-// with no PortID, where same-serial units are indistinguishable after the open;
-// it is resolved by search as Open does, which reports *AmbiguousDeviceError when
-// twins are present.
+// Card, except in the one shape the post-open check cannot pin (below), whose
+// Card is ignored. That shape is a USB serial-form ID with no PortID, where
+// same-serial units are indistinguishable after the open; it is resolved by
+// search as Open does, which reports *AmbiguousDeviceError when twins are
+// present.
 func resolveDeviceInfo(d *DeviceInfo) (resolved, error) {
 	trimmed := strings.TrimSpace(d.ID)
 	if trimmed == "" {

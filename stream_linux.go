@@ -105,7 +105,9 @@ func Open(cfg Config) (*Stream, error) {
 //
 // Config.Device is ignored; d decides what opens, and Negotiated reports d.ID as
 // the device. Errors are those of Open, plus *ConfigError (field "device") for an
-// empty ID and *BadDeviceError when ID, PortID, Card and Device disagree.
+// empty ID and *BadDeviceError when ID, PortID, Card and Device disagree (Card is
+// not checked in the serial-form-without-PortID case above, where the unit found
+// by the search is opened).
 //
 //nolint:gocritic // hugeParam: OpenDevice runs once per stream, and a value parameter has no nil case and takes a Resolve result or a map element directly.
 func OpenDevice(d DeviceInfo, cfg Config) (*Stream, error) {

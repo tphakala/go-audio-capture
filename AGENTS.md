@@ -55,7 +55,7 @@ This is the robustness contract. A change to any row is a behaviour change and n
 | Malformed device id | `*BadDeviceError` | n/a (endpoint ids are opaque) | fix the configuration |
 | Stable id matches no present device | `*DeviceNotFoundError` (unwraps to `ErrDeviceGone`) | `ErrDeviceGone` | wait for the device to reappear, then reopen |
 | `DeviceInfo` given to `OpenDevice` no longer at its card (swapped, replugged elsewhere, stale) | `ErrDeviceGone` | `ErrDeviceGone` from the endpoint lookup | `Resolve` again, then reopen |
-| Empty or inconsistent `DeviceInfo` given to `OpenDevice` | `*ConfigError` (empty `ID`), `*BadDeviceError` (fields disagree) | `*ConfigError` (empty `ID`) | pass a `DeviceInfo` from `Devices` or `Resolve` |
+| Empty or inconsistent `DeviceInfo` given to `OpenDevice` | `*ConfigError` (empty `ID`), `*BadDeviceError` (fields disagree; `Card` is not checked for a serial-form `ID` without `PortID`) | `*ConfigError` (empty `ID`) | pass a `DeviceInfo` from `Devices` or `Resolve` |
 | Two units report the same serial | `*AmbiguousDeviceError` | n/a | pin one with a listed id |
 | Rate not supported | `*BadRateError` (with the supported range) | `*BadRateError` | pick a supported rate (`SupportedRates`) |
 | Channel/format combination not supported | `*BadFormatError` (with the accepted channel range) | `*BadFormatError` (no range) | pick another format or channel count |
