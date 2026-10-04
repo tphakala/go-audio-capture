@@ -133,6 +133,10 @@ func TestSupportedRatesProbeErrorIsFatal(t *testing.T) {
 	if !errors.Is(err, unix.ENODEV) {
 		t.Fatalf("SupportedRates err = %v, want ENODEV", err)
 	}
+	// The probe error names the ioctl, like every other HW_REFINE failure.
+	if ie, ok := errors.AsType[*ioctlError](err); !ok || ie.Op != "HW_REFINE" {
+		t.Fatalf("SupportedRates err = %v, want an ioctlError naming HW_REFINE", err)
+	}
 }
 
 func TestSupportedRatesEmptyWhenNoneMatch(t *testing.T) {

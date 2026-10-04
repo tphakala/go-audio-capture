@@ -24,7 +24,9 @@ import (
 //
 // A channel/format combination the device rejects at any rate returns
 // *BadFormatError, carrying the channel range the device accepts for the format
-// (0..0 when the format is unsupported at any channel count).
+// (0..0 when the format is unsupported at any channel count). Any other errno
+// from a per-rate probe (the device vanished, the fd was closed) aborts the
+// query and is returned wrapped with the HW_REFINE name, never a truncated list.
 //
 // The returned rates slice is ascending and de-duplicated (candidates need not
 // be sorted or unique). lo and hi are the raw window bounds, useful when the
@@ -72,12 +74,13 @@ func (p *PCM) SupportedRates(channels int, format uint32, candidates []int) (rat
 		// refineProbe returns the raw ioctl error. An unsupported pin fails with
 		// EINVAL, which here just means "skip this rate". Any other errno (the
 		// device vanished mid-probe, the fd was closed) is a real failure and is
-		// returned, so the caller never gets a silently truncated rate list.
+		// returned wrapped with the ioctl name, so the caller never gets a
+		// silently truncated rate list or an opaque errno.
 		if perr := p.refineProbe(&probe); perr != nil {
 			if errors.Is(perr, unix.EINVAL) {
 				continue
 			}
-			return nil, lo, hi, perr
+			return nil, lo, hi, &ioctlError{Op: "HW_REFINE", Err: perr}
 		}
 		if probe.IntervalEmpty(ParamRate) { // defensive: some drivers empty rather than EINVAL
 			continue
