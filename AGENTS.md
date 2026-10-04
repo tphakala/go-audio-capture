@@ -53,7 +53,7 @@ This is the robustness contract. A change to any row is a behaviour change and n
 | Condition | Linux | Windows | What the caller should do |
 |---|---|---|---|
 | Malformed device id | `*BadDeviceError` | n/a (endpoint ids are opaque) | fix the configuration |
-| Stable id matches no present device | `*DeviceNotFoundError` (unwraps to `ErrDeviceGone`) | `ErrDeviceGone` | wait for the device to reappear, then reopen |
+| Stable id matches no present device | `*DeviceNotFoundError` (unwraps to `ErrDeviceGone`) | `ErrDeviceGone` from `Open`; `*DeviceNotFoundError` (unwraps to `ErrDeviceGone`) from `Resolve` | wait for the device to reappear, then reopen |
 | `DeviceInfo` given to `OpenDevice` no longer at its card (swapped, replugged elsewhere, stale) | `ErrDeviceGone` | `ErrDeviceGone` from the endpoint lookup | `Resolve` again, then reopen |
 | Empty or inconsistent `DeviceInfo` given to `OpenDevice` | `*ConfigError` (empty `ID`), `*BadDeviceError` (fields disagree before the open; a wrong `Card` with a stable `ID` is `ErrDeviceGone` after it; `Card` is not used for a serial-form `ID` without `PortID`) | `*ConfigError` (empty `ID`) | pass a `DeviceInfo` from `Devices` or `Resolve` |
 | Two units report the same serial | `*AmbiguousDeviceError` | n/a | pin one with a listed id |

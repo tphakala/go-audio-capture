@@ -209,7 +209,7 @@ What a caller sees for each failure, and what to do about it. Anything `Read` re
 | Period geometry refused (Linux) | `*GeometryError` (wraps the driver's errno) | pass other `PeriodFrames`/`Periods`, or another rate or format; `SupportedRatesVerified` lists the rates that commit at the default geometry |
 | Device held by another application | `ErrDeviceInUse`, returned at once (on Linux, a busy card that is no longer the unit a stable id resolved to is `ErrDeviceGone`) | retry later with a backoff |
 | Exclusive access disabled for the endpoint (Windows) | `ErrExclusiveNotAllowed` | the user changes the endpoint setting |
-| Configured device not attached, or the `DeviceInfo` passed to `OpenDevice` no longer names the card it was resolved to (Linux) | `ErrDeviceGone` (`*DeviceNotFoundError` for a stable id on Linux) | wait for it to reappear (`Resolve` again), then open |
+| Configured device not attached, or the `DeviceInfo` passed to `OpenDevice` no longer names the card it was resolved to (Linux) | `ErrDeviceGone` (`*DeviceNotFoundError`, which unwraps to it, for a stable id on Linux and from `Resolve` on both platforms) | wait for it to reappear (`Resolve` again), then open |
 | `DeviceInfo` passed to `OpenDevice` is empty or inconsistent | `*ConfigError` (empty `ID`), `*BadDeviceError` (on Linux, fields that disagree before the open; a wrong `Card` with a stable `ID` is `ErrDeviceGone` after it; `Card` is not used for a serial-form `ID` without `PortID`) | pass a `DeviceInfo` from `Devices` or `Resolve` |
 | Two identical units with one serial (Linux) | `*AmbiguousDeviceError` | configure one of the listed ids |
 | Overrun, consumer too slow | none: recovered and counted in `Xruns()` | watch the counter |
