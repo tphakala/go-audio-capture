@@ -16,7 +16,8 @@ var ErrClosed = errors.New("capture: stream is closed")
 var ErrExclusiveNotAllowed = errors.New("capture: exclusive access disabled for this device")
 
 // ErrDeviceInUse reports that the device is held exclusively by another
-// application.
+// application. On Linux, a busy card that is no longer the unit a stable id
+// resolved to is reported as ErrDeviceGone instead.
 var ErrDeviceInUse = errors.New("capture: device is in use by another application")
 
 // ErrDeviceGone reports that the device disappeared (unplugged, disabled, or

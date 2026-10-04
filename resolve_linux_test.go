@@ -325,8 +325,8 @@ func TestCanonicalStableIDNormalisesEscapeCase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonicalStableID: %v", err)
 	}
-	if lower != upper {
-		t.Errorf("escape case should not matter: %q vs %q", lower, upper)
+	if lower.canon != upper.canon {
+		t.Errorf("escape case should not matter: %q vs %q", lower.canon, upper.canon)
 	}
 }
 
@@ -633,7 +633,7 @@ func TestResolveNumericEnumerationFailureIsDeviceGone(t *testing.T) {
 func TestAmbiguousDeviceErrorQuotesMatches(t *testing.T) {
 	e := &AmbiguousDeviceError{
 		ID:      "usb:16d0:06f3:s=DUP:if=0,0",
-		Matches: []string{twinPort3ID, "hw:2,0"},
+		Matches: []string{twinPort3ID, hwAddrCard2},
 	}
 	// Assert the whole rendering, not just the quoting: the instruction has to
 	// stay honest about what the listed entries are, since a fallback entry is

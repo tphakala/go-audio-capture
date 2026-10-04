@@ -388,10 +388,14 @@ func hexVal(c byte) (byte, bool) {
 // verifyID is the canonical stable id the caller asked for, to be re-checked
 // after the PCM opens; it is empty for a numeric "hw:N,D" id, where the card
 // index IS what the caller named and there is nothing else to verify against.
+// verifyPort is the canonical port-form id the opened card must also carry. Only
+// resolveDeviceInfo sets it, from DeviceInfo.PortID, because the serial-form ID
+// of a resolved DeviceInfo cannot tell same-serial twins apart.
 type resolved struct {
-	card     int
-	device   int
-	verifyID string
+	card       int
+	device     int
+	verifyID   string
+	verifyPort string
 }
 
 // resolveForOpen turns any accepted device id into a card and device number.
@@ -400,7 +404,10 @@ type resolved struct {
 // enumerating, so it keeps opening exactly what it names even on a system where
 // /proc/asound cannot be read. A stable id is matched against the devices
 // present right now, on every call: caching the result would reintroduce the
-// very staleness the stable id exists to remove.
+// very staleness the stable id exists to remove. resolveDeviceInfo is the one
+// path that skips this search (except for a USB serial-form id with no PortID,
+// which it hands back here), and it keeps the guarantee by having the caller
+// verify the live sysfs identity after the open.
 func resolveForOpen(id string) (resolved, error) {
 	trimmed := strings.TrimSpace(id)
 	if !isStableIDForm(trimmed) {
@@ -410,15 +417,102 @@ func resolveForOpen(id string) (resolved, error) {
 		}
 		return resolved{card: card, device: dev}, nil
 	}
-	canon, err := canonicalStableID(trimmed)
+	p, err := canonicalStableID(trimmed)
 	if err != nil {
 		return resolved{}, err
 	}
-	d, err := matchStableID(canon, id)
+	d, err := matchStableID(p.canon, id)
 	if err != nil {
 		return resolved{}, err
 	}
-	return resolved{card: d.Card, device: d.Device, verifyID: canon}, nil
+	return resolved{card: d.Card, device: d.Device, verifyID: p.canon}, nil
+}
+
+// resolveDeviceInfo turns a DeviceInfo that Devices or Resolve returned into
+// something openable without enumerating, except in one shape (below). It reads
+// no file otherwise: the caller opens d.Card and d.Device and then runs
+// verifyCardIdentity, which re-reads the card's identity from sysfs, so a stale
+// DeviceInfo fails instead of opening whatever holds the index now.
+//
+// It rejects a DeviceInfo whose fields disagree in a way visible before the
+// open, so a zero value cannot open hw:0,0 and a numeric ID cannot name one card
+// while Card names another. A stable ID names no card index, so a wrong Card
+// beside it is caught only after the open, by verifyCardIdentity, as
+// ErrDeviceGone. In the one shape the post-open check cannot pin (below) Card is
+// ignored. That shape is a USB serial-form ID with no PortID, where
+// same-serial units are indistinguishable after the open; it is resolved by
+// search as Open does, which reports *AmbiguousDeviceError when twins are
+// present.
+func resolveDeviceInfo(d *DeviceInfo) (resolved, error) {
+	trimmed := strings.TrimSpace(d.ID)
+	if trimmed == "" {
+		return resolved{}, &ConfigError{Field: "device", Reason: "DeviceInfo.ID is empty; pass a DeviceInfo from Devices or Resolve"}
+	}
+	if d.Card < 0 || d.Device < 0 {
+		return resolved{}, &BadDeviceError{Value: d.ID, Err: errors.New("negative card or device number")}
+	}
+	if !isStableIDForm(trimmed) {
+		// Devices never pairs a numeric id with a PortID: a numeric fallback means
+		// the card has no derivable USB port.
+		if d.PortID != "" {
+			return resolved{}, &BadDeviceError{Value: d.PortID, Err: errors.New("PortID set on a numeric DeviceInfo.ID")}
+		}
+		card, dev, perr := parseNumericDeviceID(d.ID)
+		if perr != nil {
+			return resolved{}, perr
+		}
+		if card != d.Card || dev != d.Device {
+			return resolved{}, &BadDeviceError{Value: d.ID, Err: fmt.Errorf("id names hw:%d,%d but Card and Device are %d,%d", card, dev, d.Card, d.Device)}
+		}
+		return resolved{card: card, device: dev}, nil
+	}
+	p, err := canonicalStableID(trimmed)
+	if err != nil {
+		return resolved{}, err
+	}
+	if p.device != d.Device {
+		return resolved{}, &BadDeviceError{Value: d.ID, Err: fmt.Errorf("id names device %d but Device is %d", p.device, d.Device)}
+	}
+	r := resolved{card: d.Card, device: d.Device, verifyID: p.canon}
+	if d.PortID != "" {
+		pp, err := checkPortID(d.PortID, p)
+		if err != nil {
+			return resolved{}, err
+		}
+		r.verifyPort = pp
+		return r, nil
+	}
+	if p.usb && !p.port {
+		return resolveForOpen(d.ID)
+	}
+	return r, nil
+}
+
+// checkPortID validates a DeviceInfo.PortID against the already-parsed ID and
+// returns its canonical spelling. The PortID must be the port form of the same
+// USB function (vendor, product, interface and device number) the ID names, and
+// when the ID is itself the port form the two must be the same id.
+func checkPortID(portID string, id parsedID) (string, error) {
+	bad := func(reason string) error {
+		return &BadDeviceError{Value: portID, Err: errors.New(reason)}
+	}
+	if !id.usb {
+		return "", bad("PortID set on a DeviceInfo whose ID is not a USB id")
+	}
+	pp, err := canonicalStableID(strings.TrimSpace(portID))
+	if err != nil {
+		return "", err
+	}
+	if !pp.usb || !pp.port {
+		return "", bad("PortID is not a port-form id")
+	}
+	if pp.vidpid != id.vidpid || pp.iface != id.iface || pp.device != id.device {
+		return "", bad("PortID names a different USB function than ID")
+	}
+	if id.port && pp.canon != id.canon {
+		return "", bad("PortID differs from the port-form ID")
+	}
+	return pp.canon, nil
 }
 
 // Resolve reports which device an id currently names, without opening it. It
@@ -452,11 +546,11 @@ func Resolve(id string) (DeviceInfo, error) {
 		}
 		return DeviceInfo{}, &DeviceNotFoundError{ID: id}
 	}
-	canon, err := canonicalStableID(trimmed)
+	p, err := canonicalStableID(trimmed)
 	if err != nil {
 		return DeviceInfo{}, err
 	}
-	return matchStableID(canon, id)
+	return matchStableID(p.canon, id)
 }
 
 // matchStableID finds the one device a canonical stable id names. orig is the
@@ -513,13 +607,27 @@ func isStableIDForm(id string) bool {
 	return strings.HasPrefix(id, "hw:") && strings.Contains(id, "=")
 }
 
+// parsedID is a stable id after parsing: canon is its canonical spelling, and
+// the rest are the fields it was built from, so a caller can compare an id with
+// the other fields of a DeviceInfo without re-parsing. device is the PCM device
+// number (0 when omitted), usb is set for the "usb:" forms, port for the "p="
+// selector, and vidpid is the lowercase "<vid>:<pid>" of a USB id.
+type parsedID struct {
+	canon  string
+	device int
+	usb    bool
+	port   bool
+	vidpid string
+	iface  int
+}
+
 // canonicalStableID parses a stable id and renders it back in canonical
 // spelling, so an id that differs only cosmetically still compares equal to the
 // ids Devices generates. It normalizes vid/pid to lowercase hex, the CARD and
 // DEV keys to their canonical case, percent-escapes to uppercase hex digits, and
 // an omitted DEV to ",DEV=0", and it re-escapes the value through the same
 // builders Devices uses, so any of those variations resolves.
-func canonicalStableID(id string) (string, error) {
+func canonicalStableID(id string) (parsedID, error) {
 	if strings.HasPrefix(id, "usb:") {
 		return canonicalUSBID(id)
 	}
@@ -529,8 +637,8 @@ func canonicalStableID(id string) (string, error) {
 // canonicalUSBID parses "usb:<vid>:<pid>:{s|p}=<value>:if=<n>,<dev>". The value
 // is delimited by the LAST ":if=" rather than by splitting on every ':', so a
 // port value may carry the raw colons of a PCI address.
-func canonicalUSBID(id string) (string, error) {
-	bad := func(err error) (string, error) { return "", &BadDeviceError{Value: id, Err: err} }
+func canonicalUSBID(id string) (parsedID, error) {
+	bad := func(err error) (parsedID, error) { return parsedID{}, &BadDeviceError{Value: id, Err: err} }
 
 	rest := strings.TrimPrefix(id, "usb:")
 	vid, rest, ok := strings.Cut(rest, ":")
@@ -577,18 +685,22 @@ func canonicalUSBID(id string) (string, error) {
 	// fixes the port form (the old code escaped the value as a serial and then
 	// discarded that result for a port id).
 	u := &USBInfo{VendorID: strings.ToLower(vid), ProductID: strings.ToLower(pid), Interface: ifNum}
+	p := parsedID{device: device, usb: true, vidpid: u.VendorID + ":" + u.ProductID, iface: ifNum}
 	if kind == "s" {
 		u.Serial = value
-		return usbSerialID(u, device), nil
+		p.canon = usbSerialID(u, device)
+		return p, nil
 	}
 	u.Port = value
-	return usbPortID(u, device), nil
+	p.canon = usbPortID(u, device)
+	p.port = true
+	return p, nil
 }
 
 // canonicalCardID parses the alsa-lib "hw:CARD=<name>[,DEV=<n>]" form, with DEV
 // defaulting to 0 exactly as alsa-lib does.
-func canonicalCardID(id string) (string, error) {
-	bad := func(err error) (string, error) { return "", &BadDeviceError{Value: id, Err: err} }
+func canonicalCardID(id string) (parsedID, error) {
+	bad := func(err error) (parsedID, error) { return parsedID{}, &BadDeviceError{Value: id, Err: err} }
 
 	rest := strings.TrimPrefix(id, "hw:")
 	cardPart, devPart, hasComma := strings.Cut(rest, ",")
@@ -607,7 +719,7 @@ func canonicalCardID(id string) (string, error) {
 			return bad(fmt.Errorf("device number: %w", err))
 		}
 	}
-	return cardFormID(name, device), nil
+	return parsedID{canon: cardFormID(name, device), device: device}, nil
 }
 
 // parseNumericDeviceID accepts the current-boot forms "hw:card,device",
@@ -651,32 +763,40 @@ func isHex4(s string) bool {
 	return true
 }
 
-// verifyCardIdentity re-reads card's identity after its PCM has been opened and
-// reports whether it still matches want, the stable id that resolved to it.
+// verifyCardIdentity re-reads r's card identity after its PCM has been opened
+// and reports whether it still matches r.verifyID, the stable id that resolved to
+// it, and r.verifyPort when that is set.
 //
 // This closes the window between resolving an id to a card index and opening
 // that index: in between, the card could be unplugged and a different one take
 // the index. Re-reading after the fd exists makes the result independent of
 // what the kernel does with an fd held across an unplug, because a mismatch is
 // detected either way.
-func verifyCardIdentity(card, device int, want string) error {
-	if want == "" {
+func verifyCardIdentity(r resolved) error {
+	if r.verifyID == "" {
 		return nil
 	}
-	ci := readCardIdent(sysRoot, card)
-	id, stable := stableID(ci, card, device)
+	ci := readCardIdent(sysRoot, r.card)
+	id, stable := stableID(ci, r.card, r.device)
 	if !stable {
 		// The card we opened can no longer be identified, so it cannot be shown
 		// to be the one that was asked for. Treat that as the device being gone
 		// rather than assuming the best.
 		return ErrDeviceGone
 	}
-	if id == want {
+	pid := usbPortID(ci.USB, r.device)
+	// Checked before the verifyID acceptance below: a serial-form id matches both
+	// of two same-serial units, so only the port tells the unit that resolved
+	// from the one that now holds the index.
+	if r.verifyPort != "" && pid != r.verifyPort {
+		return ErrDeviceGone
+	}
+	if id == r.verifyID {
 		return nil
 	}
 	// The port form is an equally valid name for the same hardware, so a
 	// caller who pinned a port must not be failed here.
-	if pid := usbPortID(ci.USB, device); pid != "" && pid == want {
+	if pid != "" && pid == r.verifyID {
 		return nil
 	}
 	return ErrDeviceGone

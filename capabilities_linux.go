@@ -45,7 +45,8 @@ var standardRates = []int{
 // START, so it does not move the device out of its current state.
 //
 // If the device is held exclusively by another process the open itself fails
-// and the returned error is ErrDeviceInUse; a missing device, or one removed
+// and the returned error is ErrDeviceInUse (ErrDeviceGone when the busy card is
+// no longer the unit a stable id resolved to); a missing device, or one removed
 // during the query, yields ErrDeviceGone; a channel count or format the device
 // does not support at any rate yields *BadFormatError, which carries the
 // channel range the device does accept for the format. Resolving the device
@@ -92,9 +93,15 @@ func prepareQuery(device string, channels int, format Format) (resolved, error) 
 func openQuery(r resolved) (ratePCM, error) {
 	p, err := openRatePCM(r.card, r.device)
 	if err != nil {
+		// Attribute the failure to the card only once it is shown to be the unit
+		// that was asked for: a busy card that took over the index of an unplugged
+		// one must read as the device being gone, not as busy (retry later).
+		if verr := verifyCardIdentity(r); verr != nil {
+			return nil, verr
+		}
 		return nil, translateQueryError(err)
 	}
-	if err := verifyCardIdentity(r.card, r.device, r.verifyID); err != nil {
+	if err := verifyCardIdentity(r); err != nil {
 		_ = p.Close()
 		return nil, err
 	}

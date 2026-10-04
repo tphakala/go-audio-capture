@@ -27,7 +27,12 @@
 //     rather than from the ALSA card index, which follows kernel probe order.
 //     When no stable form can be derived IDStable is false and ID is only a
 //     current-boot address that must not be persisted. Resolve reports what an
-//     id currently names without opening it.
+//     id currently names without opening it, and OpenDevice opens a DeviceInfo
+//     that Resolve already returned without resolving it again (on Linux it
+//     still confirms after the open that the card is the same unit). The one
+//     exception is a Linux USB ID in the serial form with no PortID, which is
+//     resolved again as Open would, because nothing read after the open can
+//     tell two units with one serial apart.
 //   - Robust failure handling for unattended capture. Overruns, system suspend
 //     and driver stalls are recovered inside Stream.Read and counted by
 //     Stream.Xruns; a busy, missing, unplugged or stalled device is reported as
@@ -41,8 +46,9 @@
 // transition, so it does not disturb a device another process holds). It is
 // Linux-only and returns ErrCapabilitiesUnsupported on other platforms.
 //
-// The public API (Devices, Resolve, Open, Stream, SupportedRates) is platform-neutral;
-// the Linux ALSA implementation lives in the *_linux.go files and internal/alsa,
-// and the Windows WASAPI implementation in the *_windows.go files and
-// internal/wasapi. A macOS CoreAudio backend is planned.
+// The public API (Devices, Resolve, Open, OpenDevice, Stream, SupportedRates,
+// SupportedRatesVerified) is platform-neutral; the Linux ALSA implementation
+// lives in the *_linux.go files and internal/alsa, and the Windows WASAPI
+// implementation in the *_windows.go files and internal/wasapi. A macOS
+// CoreAudio backend is planned.
 package capture

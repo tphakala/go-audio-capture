@@ -47,14 +47,14 @@ func (f *fakeDevice) Close() error {
 	return nil
 }
 
-func swapOpenDevice(d wasapiDevice) func() {
-	prev := openDevice
-	openDevice = func(_ string) (wasapiDevice, error) { return d, nil }
-	return func() { openDevice = prev }
+func swapOpenEndpoint(d wasapiDevice) func() {
+	prev := openEndpoint
+	openEndpoint = func(_ string) (wasapiDevice, error) { return d, nil }
+	return func() { openEndpoint = prev }
 }
 
 func TestOpenReportsNegotiated(t *testing.T) {
-	defer swapOpenDevice(&fakeDevice{readFn: func() (int, bool, error) { return 0, false, nil }})()
+	defer swapOpenEndpoint(&fakeDevice{readFn: func() (int, bool, error) { return 0, false, nil }})()
 	s, err := Open(Config{Device: "default", Rate: 48000, Channels: 2, Format: FormatS16LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -82,7 +82,7 @@ func TestReadCountsDiscontinuity(t *testing.T) {
 		}
 		return 480, false, nil
 	}}
-	defer swapOpenDevice(f)()
+	defer swapOpenEndpoint(f)()
 	s, err := Open(Config{Device: "", Rate: 48000, Channels: 1, Format: FormatS16LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -115,7 +115,7 @@ func TestCloseUnblocksRead(t *testing.T) {
 		<-f.block       // park until Close unblocks us
 		return 0, false, wasapi.ErrClosed
 	}
-	defer swapOpenDevice(f)()
+	defer swapOpenEndpoint(f)()
 	s, err := Open(Config{Device: "", Rate: 48000, Channels: 1, Format: FormatS16LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -137,7 +137,7 @@ func TestCloseUnblocksRead(t *testing.T) {
 }
 
 func TestReadAfterCloseReturnsErrClosed(t *testing.T) {
-	defer swapOpenDevice(&fakeDevice{readFn: func() (int, bool, error) { return 0, false, nil }})()
+	defer swapOpenEndpoint(&fakeDevice{readFn: func() (int, bool, error) { return 0, false, nil }})()
 	s, err := Open(Config{Device: "", Rate: 48000, Channels: 1, Format: FormatS16LE})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -178,7 +178,7 @@ func TestWaFormat(t *testing.T) {
 }
 
 func TestOpenRejectsBadConfig(t *testing.T) {
-	defer swapOpenDevice(&fakeDevice{readFn: func() (int, bool, error) { return 0, false, nil }})()
+	defer swapOpenEndpoint(&fakeDevice{readFn: func() (int, bool, error) { return 0, false, nil }})()
 	tests := []Config{
 		{Device: "", Rate: 0, Channels: 1, Format: FormatS16LE},
 		{Device: "", Rate: 48000, Channels: 0, Format: FormatS16LE},
@@ -219,7 +219,7 @@ func TestStartTranslatesErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer swapOpenDevice(&fakeDevice{startErr: tt.startErr})()
+			defer swapOpenEndpoint(&fakeDevice{startErr: tt.startErr})()
 			s, err := Open(Config{Device: "", Rate: 48000, Channels: 1, Format: FormatS16LE})
 			if err != nil {
 				t.Fatalf("Open: %v", err)
@@ -281,10 +281,66 @@ func TestOpenTranslatesNegotiateErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer swapOpenDevice(&fakeDevice{negErr: tt.negErr})()
+			defer swapOpenEndpoint(&fakeDevice{negErr: tt.negErr})()
 			_, err := Open(Config{Device: "", Rate: 48000, Channels: 1, Format: FormatS16LE})
 			if err == nil || !tt.check(err) {
 				t.Errorf("Open with %v = %v, want translated public error", tt.negErr, err)
+			}
+		})
+	}
+}
+
+func TestOpenDevicePassesEndpointID(t *testing.T) {
+	prev := openEndpoint
+	t.Cleanup(func() { openEndpoint = prev })
+	var got string
+	openEndpoint = func(id string) (wasapiDevice, error) {
+		got = id
+		return &fakeDevice{}, nil
+	}
+	d := DeviceInfo{ID: "{0.0.1.00000000}.{abc}"}
+	s, err := OpenDevice(d, Config{Device: "ignored", Rate: 48000, Channels: 2, Format: FormatS16LE})
+	if err != nil {
+		t.Fatalf("OpenDevice: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if got != d.ID {
+		t.Errorf("opened endpoint %q, want %q", got, d.ID)
+	}
+	if dev := s.Negotiated().Device; dev != d.ID {
+		t.Errorf("Negotiated().Device = %q, want %q", dev, d.ID)
+	}
+}
+
+func TestOpenDeviceRejectsEmptyID(t *testing.T) {
+	prev := openEndpoint
+	t.Cleanup(func() { openEndpoint = prev })
+	openEndpoint = func(string) (wasapiDevice, error) {
+		t.Fatal("must not open an endpoint for an empty DeviceInfo.ID")
+		return nil, errors.New("unreachable")
+	}
+	_, err := OpenDevice(DeviceInfo{}, Config{Rate: 48000, Channels: 2, Format: FormatS16LE})
+	ce, ok := errors.AsType[*ConfigError](err)
+	if !ok || ce.Field != "device" {
+		t.Fatalf("err = %v, want *ConfigError for field device", err)
+	}
+}
+
+func TestOpenDeviceChecksConfigBeforeDevice(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		cfg   Config
+		field string
+	}{
+		{"rate", Config{Rate: 0, Channels: 1, Format: FormatS16LE}, "rate"},
+		{"channels", Config{Rate: 48000, Channels: 0, Format: FormatS16LE}, "channels"},
+		{"format", Config{Rate: 48000, Channels: 1, Format: Format(99)}, "format"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := OpenDevice(DeviceInfo{}, tt.cfg)
+			ce, ok := errors.AsType[*ConfigError](err)
+			if !ok || ce.Field != tt.field {
+				t.Fatalf("err = %v, want *ConfigError for field %s", err, tt.field)
 			}
 		})
 	}

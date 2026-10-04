@@ -83,7 +83,7 @@ for {
 }
 ```
 
-`Read` is single-consumer and blocking; `Close` may be called from another goroutine to unblock it. Overruns, resumes after a system suspend and restarted stalls are recovered internally and counted via `Stream.Xruns()`. On Linux recovery is bounded per `Read` call: a repeated stall, or a ninth recoverable failure (overrun, suspend or stall) after 8 recoveries without any frames delivered, returns a `*StallError` (`errors.Is(err, capture.ErrDeviceStalled)`) unless a probe at that point finds the device gone, in which case it returns `capture.ErrDeviceGone`; after a `*StallError` the stream must be closed and reopened. On Linux a device unplugged while `Read` is parked returns `capture.ErrDeviceGone`. On Linux `Open` on a device held by another application fails at once with `capture.ErrDeviceInUse` instead of waiting for it. The full list is under [Failure handling](#failure-handling).
+`Read` is single-consumer and blocking; `Close` may be called from another goroutine to unblock it. Overruns, resumes after a system suspend and restarted stalls are recovered internally and counted via `Stream.Xruns()`. On Linux recovery is bounded per `Read` call: a repeated stall, or a ninth recoverable failure (overrun, suspend or stall) after 8 recoveries without any frames delivered, returns a `*StallError` (`errors.Is(err, capture.ErrDeviceStalled)`) unless a probe at that point finds the device gone, in which case it returns `capture.ErrDeviceGone`; after a `*StallError` the stream must be closed and reopened. On Linux a device unplugged while `Read` is parked returns `capture.ErrDeviceGone`. On Linux `Open` on a device held by another application fails at once with `capture.ErrDeviceInUse` instead of waiting for it (a busy card that is no longer the unit a stable id resolved to is `capture.ErrDeviceGone`). The full list is under [Failure handling](#failure-handling).
 
 ### Device ids are stable
 
@@ -101,7 +101,7 @@ The `hw:CARD=` form is only as unique as the kernel card id it carries. The kern
 
 The id falls back to `hw:N,D` with `IDStable` false whenever no stable form can be built: sysfs cannot be read (a container with a partial `/sys`), or a USB card reports no serial and no derivable port, or a non-USB card has no kernel card id. A false `IDStable` is the signal not to persist it.
 
-`Config.Device` accepts any of these, and still accepts a plain `hw:card,device` for interactive use. A stable id is resolved on every `Open`, `SupportedRates`, and `SupportedRatesVerified` call, never cached, and re-checked once more after the device is open, so a card swapped in the window between resolving and opening is caught rather than recorded. `Resolve` answers the same question without opening anything:
+`Config.Device` accepts any of these, and still accepts a plain `hw:card,device` for interactive use. A stable id is resolved on every `Open`, `SupportedRates`, and `SupportedRatesVerified` call, never cached, and re-checked once more after the device is open, so a card swapped in the window between resolving and opening is caught rather than recorded. `OpenDevice` skips the search for a `DeviceInfo` you already hold (except a USB serial-form `ID` with no `PortID`, see below), but not the check after the open. `Resolve` answers the same question without opening anything:
 
 ```go
 var amb *capture.AmbiguousDeviceError
@@ -115,6 +115,19 @@ case errors.Is(err, capture.ErrDeviceGone):
     // *DeviceNotFoundError: the hardware is not attached right now.
 case err == nil:
     log.Printf("%s is currently %s", d.Name, d.HWAddr)
+}
+```
+
+To open what `Resolve` returned without enumerating again (with one exception, below), pass it to `OpenDevice`. On Linux it opens `d.Card` and `d.Device` directly and then re-reads the card's identity from sysfs (`ID`, and `PortID` when set), so a `DeviceInfo` that went stale fails with `ErrDeviceGone` instead of opening another unit; resolve again and retry. `Config.Device` is ignored, and `Negotiated().Device` reports `d.ID`. A `DeviceInfo` with `IDStable` false opens its `hw:N,D` address unverified, as `Open` does. A USB `ID` in the serial form with no `PortID` is resolved as `Open` would, because nothing read after the open can tell two units with one serial apart. Persist the `ID`, not the `DeviceInfo`: its `Card` is a current-boot index.
+
+```go
+d, err := capture.Resolve(persistedID)
+if err != nil {
+    return err
+}
+s, err := capture.OpenDevice(d, capture.Config{Rate: 48000, Channels: 1, Format: capture.FormatS16LE})
+if errors.Is(err, capture.ErrDeviceGone) {
+    // The device moved or went away between Resolve and OpenDevice: Resolve again.
 }
 ```
 
@@ -136,7 +149,7 @@ rs, err := capture.SupportedRates(devs[0].ID, 1, capture.FormatS16LE)
 // rs.Min, rs.Max == 192000, 384000                // raw HW_REFINE window
 ```
 
-If the device is held exclusively by another process the query returns `ErrDeviceInUse`; a channel/format combination the hardware cannot do at any rate returns `*BadFormatError`, which carries the channel range the device accepts for that format in `MinChannels` and `MaxChannels` (bounds only: a device taking 1, 2 or 8 channels reports 1..8); a missing device, or one removed during the query, returns `ErrDeviceGone`. In each case the caller should fall back to a static rate list. `SupportedRates` is Linux-only for now and returns `ErrCapabilitiesUnsupported` on other platforms.
+If the device is held exclusively by another process the query returns `ErrDeviceInUse` (`ErrDeviceGone` if the busy card is no longer the unit a stable id resolved to); a channel/format combination the hardware cannot do at any rate returns `*BadFormatError`, which carries the channel range the device accepts for that format in `MinChannels` and `MaxChannels` (bounds only: a device taking 1, 2 or 8 channels reports 1..8); a missing device, or one removed during the query, returns `ErrDeviceGone`. In each case the caller should fall back to a static rate list. `SupportedRates` is Linux-only for now and returns `ErrCapabilitiesUnsupported` on other platforms.
 
 `cmd/gac-rec` is a small debug recorder used for hardware validation:
 
@@ -156,7 +169,7 @@ Architectures: the Linux backend supports the little-endian LP64 arches (`amd64`
 
 The Windows backend talks to WASAPI through hand-rolled COM over `golang.org/x/sys/windows` (no cgo, no third-party COM or audio dependency), the Windows analog of the ALSA backend. It captures in **exclusive mode only** (`AUDCLNT_SHAREMODE_EXCLUSIVE`), the WASAPI equivalent of ALSA `hw:` access: the format is negotiated directly with the endpoint. Shared mode is deliberately unsupported, because the OS mixer resamples to the engine mix rate and converts the sample format behind the caller's back, the same silent conversion the library exists to avoid. `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` is never used.
 
-The public API is identical to Linux; only the device string differs. `DeviceInfo.ID` holds the opaque WASAPI endpoint-id string, which is also reported as `HWAddr` with `IDStable` true (Windows has no separate unstable address as Linux does); `Card`, `Device`, `CardID`, `PortID`, and `USB` are Linux-only and stay at their zero values. `Config.Device` takes that endpoint-id string, or `""` / `"default"` for the default capture endpoint. The requested rate, channel count, and sample format are negotiated exactly or `Open` fails with a typed error:
+The public API is identical to Linux; only the device string differs. `DeviceInfo.ID` holds the opaque WASAPI endpoint-id string, which is also reported as `HWAddr` with `IDStable` true (Windows has no separate unstable address as Linux does); `Card`, `Device`, `CardID`, `PortID`, and `USB` are Linux-only and stay at their zero values. `Config.Device` takes that endpoint-id string, or `""` / `"default"` for the default capture endpoint. `OpenDevice` is equivalent to `Open` with `Config.Device` set to the `DeviceInfo.ID` (Windows never enumerates to open an endpoint); it exists so code written for Linux opens what `Resolve` returned on both platforms. The requested rate, channel count, and sample format are negotiated exactly or `Open` fails with a typed error:
 
 - `*BadRateError`: the exact rate is unsupported (carries the endpoint's supported range when it can be determined).
 - `*BadFormatError`: the channel-count / sample-format combination is unsupported. Exclusive endpoints commonly accept only specific layouts (e.g. stereo S16 but not mono), and the library returns this rather than up/down-mixing or converting.
@@ -194,9 +207,10 @@ What a caller sees for each failure, and what to do about it. Anything `Read` re
 | Rate not supported | `*BadRateError` (carries the supported range) | pick a supported rate; `SupportedRates` lists them on Linux |
 | Channel count or sample format not supported | `*BadFormatError` (Linux: carries the accepted channel range) | pick another layout |
 | Period geometry refused (Linux) | `*GeometryError` (wraps the driver's errno) | pass other `PeriodFrames`/`Periods`, or another rate or format; `SupportedRatesVerified` lists the rates that commit at the default geometry |
-| Device held by another application | `ErrDeviceInUse`, returned at once | retry later with a backoff |
+| Device held by another application | `ErrDeviceInUse`, returned at once (on Linux, a busy card that is no longer the unit a stable id resolved to is `ErrDeviceGone`) | retry later with a backoff |
 | Exclusive access disabled for the endpoint (Windows) | `ErrExclusiveNotAllowed` | the user changes the endpoint setting |
-| Configured device not attached | `ErrDeviceGone` (`*DeviceNotFoundError` for a stable id on Linux) | wait for it to reappear (`Resolve`), then open |
+| Configured device not attached, or the `DeviceInfo` passed to `OpenDevice` no longer names the card it was resolved to (Linux) | `ErrDeviceGone` (`*DeviceNotFoundError` for a stable id on Linux) | wait for it to reappear (`Resolve` again), then open |
+| `DeviceInfo` passed to `OpenDevice` is empty or inconsistent | `*ConfigError` (empty `ID`), `*BadDeviceError` (on Linux, fields that disagree before the open; a wrong `Card` with a stable `ID` is `ErrDeviceGone` after it; `Card` is not used for a serial-form `ID` without `PortID`) | pass a `DeviceInfo` from `Devices` or `Resolve` |
 | Two identical units with one serial (Linux) | `*AmbiguousDeviceError` | configure one of the listed ids |
 | Overrun, consumer too slow | none: recovered and counted in `Xruns()` | watch the counter |
 | System suspend and resume (Linux) | none: recovered and counted | nothing |

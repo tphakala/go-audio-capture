@@ -40,7 +40,7 @@ These are the reason the library exists. A change that violates one is wrong eve
 2. **No userspace audio layers.** Linux is `hw:`-level only: no `plug`, `dsnoop`, `dmix`, `default`. Windows is exclusive mode only: no shared mode, never `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`.
 3. **No cgo, ever.** Everything must build with `CGO_ENABLED=0`. The only runtime dependency is `golang.org/x/sys`. (`go-ruleguard/dsl` is lint-only, behind a build tag.)
 4. **Typed, specific errors.** Errors name the failing ioctl or COM call and wrap errno/HRESULT. Map conditions to the sentinels in `errors.go` (`ErrClosed`, `ErrDeviceGone`, `ErrDeviceInUse`, `ErrDeviceStalled`, `ErrExclusiveNotAllowed`, `ErrCapabilitiesUnsupported`) so callers can use `errors.Is`/`errors.As`. Never surface an opaque "invalid argument".
-5. **Stable device ids.** On Linux `DeviceInfo.ID` is derived from sysfs (USB serial, USB port, or `hw:CARD=<id>,DEV=<n>`), not the probe-order card index. `HWAddr` (`hw:N,D`) is display-only. A stable id is resolved on every `Open`/`SupportedRates*`/`Resolve` call, never cached, and re-verified after the device is opened. Ambiguity (two units with one serial) is an error, never a guess.
+5. **Stable device ids.** On Linux `DeviceInfo.ID` is derived from sysfs (USB serial, USB port, or `hw:CARD=<id>,DEV=<n>`), not the probe-order card index. `HWAddr` (`hw:N,D`) is display-only. A stable id is resolved on every `Open`/`SupportedRates*`/`Resolve` call, never cached, and re-verified after the device is opened. `OpenDevice` takes an already-resolved `DeviceInfo` and skips the search, but still re-verifies `ID` and `PortID` against live sysfs after the open. The one exception is a USB serial-form `ID` with no `PortID`: nothing read after the open tells same-serial twins apart, so `resolveDeviceInfo` falls back to the full search (`resolveForOpen`) on purpose, to keep the ambiguity check; do not remove it as a redundant enumeration. Ambiguity (two units with one serial) is an error, never a guess.
 6. **ABI correctness over convenience.** `internal/alsa` mirrors `sound/asound.h`. Struct layouts and size-encoded ioctl numbers differ between LP64 and ILP32 and are pinned in layout tests. Unsupported GOARCHes (big-endian, PowerPC, MIPS) must fail to build via the `unsupported_GOARCH` sentinel in `abi_unsupported.go`, not compile with wrong numbers.
 7. **Zero allocations in steady-state `Read`.** Both backends are allocation-free on the capture path; alloc tests guard this. Error paths may allocate.
 8. **Concurrency contract.** `Read` is single-consumer and blocking. `Close` may be called from another goroutine and must unblock a parked `Read`, which then returns `ErrClosed`. A `Close` always wins over any other classification. No ioctl or COM call may run on a handle after it is closed.
@@ -54,12 +54,14 @@ This is the robustness contract. A change to any row is a behaviour change and n
 |---|---|---|---|
 | Malformed device id | `*BadDeviceError` | n/a (endpoint ids are opaque) | fix the configuration |
 | Stable id matches no present device | `*DeviceNotFoundError` (unwraps to `ErrDeviceGone`) | `ErrDeviceGone` | wait for the device to reappear, then reopen |
+| `DeviceInfo` given to `OpenDevice` no longer at its card (swapped, replugged elsewhere, stale) | `ErrDeviceGone` | `ErrDeviceGone` from the endpoint lookup | `Resolve` again, then reopen |
+| Empty or inconsistent `DeviceInfo` given to `OpenDevice` | `*ConfigError` (empty `ID`), `*BadDeviceError` (fields disagree before the open; a wrong `Card` with a stable `ID` is `ErrDeviceGone` after it; `Card` is not used for a serial-form `ID` without `PortID`) | `*ConfigError` (empty `ID`) | pass a `DeviceInfo` from `Devices` or `Resolve` |
 | Two units report the same serial | `*AmbiguousDeviceError` | n/a | pin one with a listed id |
 | Rate not supported | `*BadRateError` (with the supported range) | `*BadRateError` | pick a supported rate (`SupportedRates`) |
 | Channel/format combination not supported | `*BadFormatError` (with the accepted channel range) | `*BadFormatError` (no range) | pick another format or channel count |
 | Period geometry refused (every refine passed, `HW_PARAMS` refused, or no value near the requested period is attainable) | `*GeometryError` | n/a | pass other `PeriodFrames`/`Periods`, or another rate/format; `SupportedRatesVerified` lists the rates that commit at the default geometry |
 | Device removed during `SupportedRates*` | `ErrDeviceGone` (`ENODEV`, or `EBADFD` confirmed by a `PVERSION` probe) | `ErrCapabilitiesUnsupported` | fall back to a static rate list |
-| Device held by another application | `ErrDeviceInUse` at once from `Open` and `SupportedRates*` | `ErrDeviceInUse` | retry later with backoff |
+| Device held by another application | `ErrDeviceInUse` at once from `Open` and `SupportedRates*` (a busy card that is not the resolved unit is `ErrDeviceGone`) | `ErrDeviceInUse` | retry later with backoff |
 | Exclusive access disabled for the endpoint | n/a | `ErrExclusiveNotAllowed` | user changes the endpoint setting |
 | Overrun (consumer too slow) | recovered inside `Read`, counted in `Xruns()` | counted in `Xruns()` | nothing; watch the counter |
 | System suspend/resume | resumed or re-prepared inside `Read`, counted | n/a | nothing |
@@ -78,14 +80,14 @@ errors.go             Sentinel errors and typed error structs (shared by all pla
 doc.go                Package godoc (keep in sync with README when scope changes)
 
 devices_linux.go      Devices(): parses /proc/asound, builds DeviceInfo (procRoot/sysRoot vars)
-deviceid_linux.go     sysfs-derived stable ids, escaping, Resolve(), post-open re-verification
-stream_linux.go       Open/Stream on Linux; drives the `pcm` interface (openPCM seam); Read's
+deviceid_linux.go     sysfs-derived stable ids, escaping, Resolve(), OpenDevice's resolveDeviceInfo, post-open re-verification
+stream_linux.go       Open/OpenDevice/Stream on Linux; drives the `pcm` interface (openPCM seam); Read's
                       recovery budget and terminalError classification
 capabilities_linux.go SupportedRates (HW_REFINE only) and SupportedRatesVerified (HW_PARAMS probe)
 capabilities_other.go Non-Linux stubs returning ErrCapabilitiesUnsupported
 
 devices_windows.go    Devices() via WASAPI endpoint enumeration
-stream_windows.go     Open/Stream on Windows (openDevice seam)
+stream_windows.go     Open/OpenDevice/Stream on Windows (openEndpoint seam)
 
 internal/alsa/        Kernel ABI: hwparams/swparams structs, ioctl numbers, PCM (OpenPCM,
                       Negotiate, Start, ReadI, Recover, Probe, Close), IsDeviceGone and
@@ -123,7 +125,7 @@ Tests run without audio hardware. Each layer has an injection seam:
 - `internal/alsa`: `PCM` holds an `ioctlFunc`; tests construct it with `newPCM(fd, fake)`. `fakeKernel` in `lifecycle_test.go` models the PCM state machine so a test cannot claim a recovery the kernel would refuse; `fakeRateDevice` and `fakeCommitDevice` (`rates_test.go`) cover negotiation; `fakeStepDevice` (`geometry_test.go`) models narrowing refines, `rmask`, a period-bytes step rule, a buffer cap and a channel range, and `fakeStatefulRateDevice` models OPEN/SETUP with `HW_FREE`. Fakes must narrow intervals the way the kernel does (`narrowInterval`); a fake that overwrites a pinned interval would let a wrong pin pass. `sysOpen`, `sysSetNonblock` and `resumeSleep` are package seams for the open flags and the RESUME retry wait.
 - Root package, Linux: package-level function vars `openPCM` (stream) and `openRatePCM` (capabilities) are swapped for fakes (`fakePCM` in `stream_linux_test.go`; lifecycle and recovery-budget cases in `stream_lifecycle_linux_test.go`).
 - Device identity: `devicesFrom(procDir, sysDir)` takes roots; `deviceid_fixture_linux_test.go` builds throwaway `/proc/asound` and `/sys` trees with symlinks under `t.TempDir()` (sysfs symlinks cannot be committed).
-- Windows: `openDevice` var in `stream_windows.go`; WASAPI fill and format logic are tested directly.
+- Windows: `openEndpoint` var in `stream_windows.go`; WASAPI fill and format logic are tested directly.
 - Layout tests (`layout_lp64_test.go`, `layout_ilp32_test.go`) assert C-verified struct sizes, offsets and ioctl numbers. ILP32 assertions only execute under `GOARCH=386`.
 - Hardware tests are opt-in: `GAC_HW_TEST=hw:1,0 go test -run TestHardwareSupportedRates -v`. They never run in CI.
 
@@ -183,7 +185,7 @@ Flag these, they are real defects here:
 Intentional, do not flag:
 
 - `unsafe.Pointer` conversions when passing structs to ioctls and COM vtables; layouts are pinned by the layout tests.
-- Package-level function variables (`openPCM`, `openRatePCM`, `openDevice`, `sysOpen`, `sysSetNonblock`, `resumeSleep`) used as test seams.
+- Package-level function variables (`openPCM`, `openRatePCM`, `openEndpoint`, `sysOpen`, `sysSetNonblock`, `resumeSleep`) used as test seams.
 - Ignored errors from best-effort cleanup (`_ = p.Close()` on an error path, `Close`'s `DROP`).
 - Mutexes that are never held across a blocking syscall; `Close` coordinates through the in-flight count instead.
 - Magic numbers in `internal/alsa` and `internal/wasapi` that mirror kernel or Windows headers.
