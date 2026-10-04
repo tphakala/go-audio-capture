@@ -210,7 +210,7 @@ type Config struct {
 	// and replugs. On Windows it is the WASAPI endpoint id, or ""/"default".
 	Device       string
 	Rate         int // requested sample rate in Hz
-	Channels     int // 1 or 2
+	Channels     int // channel count the device captures; never up- or down-mixed
 	Format       Format
 	PeriodFrames int // frames per period; Linux: 0 => Rate/50 (20 ms); ignored on Windows
 	Periods      int // periods per buffer; Linux: 0 => 4; ignored on Windows
