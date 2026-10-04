@@ -105,11 +105,12 @@ var (
 	sysSetNonblock = unix.SetNonblock
 )
 
-// resumeRetries and resumeRetryDelay bound the RESUME retry loop in Recover.
-// The delay is a var so tests can set it to zero.
+// resumeRetries and resumeSleep bound the RESUME retry loop in Recover: up to
+// 100 retries 10 ms apart. resumeSleep is a var so tests can skip and count
+// the waits.
 const resumeRetries = 100
 
-var resumeRetryDelay = 10 * time.Millisecond
+var resumeSleep = func() { time.Sleep(10 * time.Millisecond) }
 
 // OpenPCM opens the capture device /dev/snd/pcmC{card}D{device}c for streaming.
 // It tries O_RDWR first (what alsa-lib uses) and falls back to O_RDONLY on a
@@ -397,7 +398,7 @@ func (p *PCM) resume() error {
 			return &ioctlError{Op: "RESUME", Err: e}
 		}
 		if errors.Is(e, unix.EAGAIN) && attempt < resumeRetries {
-			time.Sleep(resumeRetryDelay)
+			resumeSleep()
 			continue
 		}
 		// ENOSYS, EBADFD, a driver error, or EAGAIN that never cleared:

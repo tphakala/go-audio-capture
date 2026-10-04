@@ -4,11 +4,8 @@ package alsa
 
 import (
 	"errors"
-	"runtime"
 	"slices"
-	"sync"
 	"testing"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -34,24 +31,13 @@ const (
 // for the transitions Recover and Probe depend on. It derives errnos from state
 // where the kernel does, so a test cannot claim a recovery the kernel refuses.
 type fakeKernel struct {
-	mu        sync.Mutex // Close's DROP can run on another goroutine
 	state     pcmState
 	resumeErr func(call int) error // consulted on RESUME while SUSPENDED; nil result resumes
 	calls     []uintptr
 	resumes   int
-	onResume  func(call int) // runs at the start of every RESUME
 }
 
 func (k *fakeKernel) ioctl(_ int, req uintptr, arg unsafe.Pointer) error {
-	if req == iocResume && k.onResume != nil {
-		// Outside the lock: the hook may start a goroutine that issues DROP.
-		k.mu.Lock()
-		n := k.resumes + 1
-		k.mu.Unlock()
-		k.onResume(n)
-	}
-	k.mu.Lock()
-	defer k.mu.Unlock()
 	k.calls = append(k.calls, req)
 	if len(k.calls) > loopGuardCalls {
 		return errLoopGuard
@@ -96,8 +82,6 @@ func (k *fakeKernel) ioctl(_ int, req uintptr, arg unsafe.Pointer) error {
 }
 
 func (k *fakeKernel) count(req uintptr) int {
-	k.mu.Lock()
-	defer k.mu.Unlock()
 	n := 0
 	for _, c := range k.calls {
 		if c == req {
@@ -107,11 +91,15 @@ func (k *fakeKernel) count(req uintptr) int {
 	return n
 }
 
-func setResumeRetryDelay(t *testing.T, d time.Duration) {
+// skipResumeSleep replaces the RESUME retry wait with a no-op for one test and
+// returns a pointer to the number of waits taken.
+func skipResumeSleep(t *testing.T) *int {
 	t.Helper()
-	prev := resumeRetryDelay
-	resumeRetryDelay = d
-	t.Cleanup(func() { resumeRetryDelay = prev })
+	var n int
+	prev := resumeSleep
+	resumeSleep = func() { n++ }
+	t.Cleanup(func() { resumeSleep = prev })
+	return &n
 }
 
 func TestRecoverResumeSuccessKeepsRunning(t *testing.T) {
@@ -176,7 +164,7 @@ func TestRecoverResumeStopsOnClosedOrGone(t *testing.T) {
 }
 
 func TestRecoverResumeEAGAINIsBounded(t *testing.T) {
-	setResumeRetryDelay(t, 0)
+	skipResumeSleep(t)
 	k := &fakeKernel{state: stateSuspended, resumeErr: func(int) error { return unix.EAGAIN }}
 	p := newPCM(-1, k.ioctl)
 	if err := p.Recover(unix.ESTRPIPE); err != nil {
@@ -191,36 +179,28 @@ func TestRecoverResumeEAGAINIsBounded(t *testing.T) {
 }
 
 func TestRecoverResumeEAGAINStopsOnClose(t *testing.T) {
-	setResumeRetryDelay(t, 0)
-	fd := openDevNull(t)
 	k := &fakeKernel{state: stateSuspended, resumeErr: func(int) error { return unix.EAGAIN }}
-	p := newPCM(fd, k.ioctl)
-	closeDone := make(chan struct{})
-	k.onResume = func(call int) {
-		if call != 3 {
-			return
-		}
-		// Close from another goroutine, as production does; it blocks until this
-		// in-flight RESUME is released, but marks the PCM closed first, so wait
-		// for that mark before returning EAGAIN.
-		go func() { _ = p.Close(); close(closeDone) }()
-		for {
-			p.mu.Lock()
-			closed := p.closed
-			p.mu.Unlock()
-			if closed {
-				return
-			}
-			runtime.Gosched()
+	p := newPCM(openDevNull(t), k.ioctl)
+	sleeps := 0
+	prev := resumeSleep
+	resumeSleep = func() {
+		// Close between retries, as a Close from another goroutine lands while
+		// Recover waits; no ioctl is in flight, so Close returns at once.
+		sleeps++
+		if sleeps == 3 {
+			_ = p.Close()
 		}
 	}
+	t.Cleanup(func() { resumeSleep = prev })
 	err := p.Recover(unix.ESTRPIPE)
-	<-closeDone
-	if !errors.Is(err, unix.EBADF) {
-		t.Fatalf("Recover = %v, want an error wrapping EBADF", err)
+	// The RESUME after Close fails acquire with EBADF and must end the loop
+	// there: not fall through to PREPARE, and not keep retrying.
+	var ie *ioctlError
+	if !errors.As(err, &ie) || ie.Op != "RESUME" || !errors.Is(err, unix.EBADF) {
+		t.Fatalf("Recover = %v, want the RESUME ioctl failing with EBADF", err)
 	}
-	if k.count(iocPrepare) != 0 {
-		t.Errorf("PREPARE was issued after Close: %v", k.calls)
+	if k.resumes != 3 || sleeps != 3 {
+		t.Errorf("RESUME calls = %d, waits = %d, want 3 each", k.resumes, sleeps)
 	}
 }
 
