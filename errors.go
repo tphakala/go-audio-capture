@@ -179,8 +179,10 @@ type BadFormatError struct {
 }
 
 func (e *BadFormatError) Error() string {
-	msg := fmt.Sprintf("capture: format %d ch / %s not supported", e.Channels, e.Format)
-	if e.Rate != 0 {
+	var msg string
+	if e.Rate == 0 {
+		msg = fmt.Sprintf("capture: format %d ch / %s not supported", e.Channels, e.Format)
+	} else {
 		msg = fmt.Sprintf("capture: format %d ch / %s @ %d Hz not supported", e.Channels, e.Format, e.Rate)
 	}
 	if e.MaxChannels > 0 {

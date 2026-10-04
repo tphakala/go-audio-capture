@@ -3,10 +3,12 @@
 package alsa
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
 	"runtime"
+	"slices"
 	"sync"
 	"time"
 	"unsafe"
@@ -565,7 +567,7 @@ func (p *PCM) refineGeometry(hw *HwParams, rate, periodFrames, periods int) erro
 		}
 		return err
 	}
-	if lo, hi := hw.Interval(ParamRate); hw.IntervalEmpty(ParamRate) || lo != uint32(rate) || hi != uint32(rate) {
+	if !hw.pinnedTo(ParamRate, uint32(rate)) {
 		return errRateRefused
 	}
 	// Period count rather than buffer size second, because Config.Periods is what
@@ -599,34 +601,62 @@ type nearCandidate struct {
 }
 
 // refineNear pins param to the accepted value nearest target, after alsa-lib's
-// snd_pcm_hw_param_set_near but bounded: at most two probe refines, two pin
-// refines, no loop. The up probe refines [target, hi] and takes the lowest value
-// the kernel leaves; the down probe refines [lo, target] and takes the highest.
-// The nearer wins and a tie goes to the larger value (a larger period means fewer
-// wakeups and more overrun headroom). A refined bound is not always attainable,
-// so each candidate is pinned and re-refined, falling back to the other one. A
-// non-EINVAL error returns at once; EINVAL or an empty interval just drops a
-// candidate. On success hw holds the pinned value.
+// snd_pcm_hw_param_set_near but bounded: no loop, at most one pin refine for the
+// target, two probe refines and two more pin refines. A target the driver accepts
+// is pinned at once. Otherwise the up probe refines [target, hi] and takes the
+// lowest value the kernel leaves, and the down probe refines [lo, target] and
+// takes the highest. The nearer wins and a tie goes to the larger value (a larger
+// period means fewer wakeups and more overrun headroom). A refined bound is not
+// always attainable, so each candidate is pinned and re-refined, falling back to
+// the other one. A non-EINVAL error returns at once; EINVAL or an empty interval
+// just drops a candidate. On success hw holds the pinned value.
 func (p *PCM) refineNear(hw *HwParams, param int, target uint32) error {
 	old := *hw.interval(param)
 	lo, hi := old.Min, old.Max
 
+	// pin tries to pin param to v on a copy and commits the copy to hw only when
+	// the refine keeps exactly [v, v]. It returns the refine error, EINVAL included.
+	pin := func(v uint32) (bool, error) {
+		c := *hw
+		c.SetIntervalExact(param, v)
+		if err := p.refineAll(&c); err != nil {
+			return false, err
+		}
+		if !c.pinnedTo(param, v) {
+			return false, nil
+		}
+		*hw = c
+		return true, nil
+	}
 	probe := func(minV, maxV, flags uint32) (Interval, bool, error) {
 		c := *hw
-		iv := c.interval(param)
-		*iv = Interval{Min: minV, Max: maxV, Flags: flags}
+		*c.interval(param) = Interval{Min: minV, Max: maxV, Flags: flags}
 		if err := p.refineAll(&c); err != nil {
 			if errors.Is(err, unix.EINVAL) {
 				return Interval{}, false, nil
 			}
 			return Interval{}, false, err
 		}
-		got := *c.interval(param)
-		return got, got.Flags&intervalEmpty == 0, nil
+		return *c.interval(param), !c.IntervalEmpty(param), nil
+	}
+
+	last := error(unix.EINVAL)
+	try := func(v uint32) (bool, error) {
+		ok, err := pin(v)
+		if err != nil && errors.Is(err, unix.EINVAL) {
+			last = err
+			return false, nil
+		}
+		return ok, err
+	}
+
+	if target >= lo && target <= hi {
+		if ok, err := try(target); ok || err != nil {
+			return err
+		}
 	}
 
 	var cands []nearCandidate
-	var up, down *nearCandidate
 	if target <= hi {
 		minV := max(target, lo)
 		flags := uint32(intervalInteger) | old.Flags&intervalOpenMax
@@ -642,7 +672,7 @@ func (p *PCM) refineNear(hw *HwParams, param int, target uint32) error {
 			if got.Flags&intervalOpenMin != 0 {
 				v++
 			}
-			up = &nearCandidate{value: v, dist: absDiff(v, target)}
+			cands = append(cands, nearCandidate{value: v, dist: absDiff(v, target)})
 		}
 	}
 	if target >= lo {
@@ -660,36 +690,16 @@ func (p *PCM) refineNear(hw *HwParams, param int, target uint32) error {
 			if got.Flags&intervalOpenMax != 0 {
 				v--
 			}
-			down = &nearCandidate{value: v, dist: absDiff(v, target)}
+			cands = append(cands, nearCandidate{value: v, dist: absDiff(v, target)})
 		}
 	}
-	switch {
-	case up != nil && down != nil && down.dist < up.dist:
-		cands = []nearCandidate{*down, *up}
-	case up != nil && down != nil:
-		cands = []nearCandidate{*up, *down}
-	case up != nil:
-		cands = []nearCandidate{*up}
-	case down != nil:
-		cands = []nearCandidate{*down}
-	}
+	// Stable, so on a tie the up candidate (appended first) stays first.
+	slices.SortStableFunc(cands, func(a, b nearCandidate) int { return cmp.Compare(a.dist, b.dist) })
 
-	last := error(unix.EINVAL)
 	for _, c := range cands {
-		pin := *hw
-		pin.SetIntervalExact(param, c.value)
-		if err := p.refineAll(&pin); err != nil {
-			if errors.Is(err, unix.EINVAL) {
-				last = err
-				continue
-			}
+		if ok, err := try(c.value); ok || err != nil {
 			return err
 		}
-		if lo, hi := pin.Interval(param); pin.IntervalEmpty(param) || lo != c.value || hi != c.value {
-			continue
-		}
-		*hw = pin
-		return nil
 	}
 	return &noNearError{err: last}
 }

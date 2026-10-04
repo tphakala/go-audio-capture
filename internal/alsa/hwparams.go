@@ -150,3 +150,10 @@ func (p *HwParams) Interval(param int) (lo, hi uint32) {
 func (p *HwParams) IntervalEmpty(param int) bool {
 	return p.interval(param).Flags&intervalEmpty != 0
 }
+
+// pinnedTo reports whether an interval parameter is non-empty and exactly
+// [value, value].
+func (p *HwParams) pinnedTo(param int, value uint32) bool {
+	lo, hi := p.Interval(param)
+	return !p.IntervalEmpty(param) && lo == value && hi == value
+}
