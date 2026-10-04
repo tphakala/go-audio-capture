@@ -62,12 +62,12 @@ type Stream struct {
 // it matches more than one, *BadRateError for an unsupported rate,
 // *BadFormatError for an unsupported channel/format combination,
 // *GeometryError when the device refuses every period geometry near the
-// requested one, ErrDeviceInUse (ErrDeviceGone on a busy card that is no longer
-// the unit a stable id resolved to)
-// when another application holds the device (Open fails at once rather than
-// waiting for it to be released), and ErrDeviceGone when the device is missing or
-// was removed. A caller that already holds a DeviceInfo can use OpenDevice to
-// skip the id resolution.
+// requested one, ErrDeviceInUse when another application holds the device (Open
+// fails at once rather than waiting for it to be released), and ErrDeviceGone
+// when the device is missing or was removed. A busy card that is no longer the
+// unit a stable id resolved to reports ErrDeviceGone, not ErrDeviceInUse. A
+// caller that already holds a DeviceInfo can use OpenDevice to skip the id
+// resolution.
 func Open(cfg Config) (*Stream, error) {
 	// Cheap, device-independent checks first, so an obviously invalid config is
 	// rejected before a /proc + /sys enumeration resolves the id. SupportedRates

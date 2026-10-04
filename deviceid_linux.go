@@ -429,10 +429,9 @@ func resolveForOpen(id string) (resolved, error) {
 
 // resolveDeviceInfo turns a DeviceInfo that Devices or Resolve returned into
 // something openable without enumerating, except in one shape (below). It reads
-// no file otherwise: the caller opens
-// d.Card and d.Device and then runs verifyCardIdentity, which re-reads the card's
-// identity from sysfs, so a stale DeviceInfo fails instead of opening whatever
-// holds the index now.
+// no file otherwise: the caller opens d.Card and d.Device and then runs
+// verifyCardIdentity, which re-reads the card's identity from sysfs, so a stale
+// DeviceInfo fails instead of opening whatever holds the index now.
 //
 // It rejects a DeviceInfo whose fields disagree, so a zero value cannot open
 // hw:0,0 and a hand-built one cannot name one card with its ID and another with
