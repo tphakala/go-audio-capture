@@ -45,7 +45,8 @@ var standardRates = []int{
 // START, so it does not move the device out of its current state.
 //
 // If the device is held exclusively by another process the open itself fails
-// and the returned error is ErrDeviceInUse; a missing device, or one removed
+// and the returned error is ErrDeviceInUse (ErrDeviceGone when the busy card is
+// no longer the unit a stable id resolved to); a missing device, or one removed
 // during the query, yields ErrDeviceGone; a channel count or format the device
 // does not support at any rate yields *BadFormatError, which carries the
 // channel range the device does accept for the format. Resolving the device

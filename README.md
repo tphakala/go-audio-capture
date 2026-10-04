@@ -83,7 +83,7 @@ for {
 }
 ```
 
-`Read` is single-consumer and blocking; `Close` may be called from another goroutine to unblock it. Overruns, resumes after a system suspend and restarted stalls are recovered internally and counted via `Stream.Xruns()`. On Linux recovery is bounded per `Read` call: a repeated stall, or a ninth recoverable failure (overrun, suspend or stall) after 8 recoveries without any frames delivered, returns a `*StallError` (`errors.Is(err, capture.ErrDeviceStalled)`) unless a probe at that point finds the device gone, in which case it returns `capture.ErrDeviceGone`; after a `*StallError` the stream must be closed and reopened. On Linux a device unplugged while `Read` is parked returns `capture.ErrDeviceGone`. On Linux `Open` on a device held by another application fails at once with `capture.ErrDeviceInUse` instead of waiting for it. The full list is under [Failure handling](#failure-handling).
+`Read` is single-consumer and blocking; `Close` may be called from another goroutine to unblock it. Overruns, resumes after a system suspend and restarted stalls are recovered internally and counted via `Stream.Xruns()`. On Linux recovery is bounded per `Read` call: a repeated stall, or a ninth recoverable failure (overrun, suspend or stall) after 8 recoveries without any frames delivered, returns a `*StallError` (`errors.Is(err, capture.ErrDeviceStalled)`) unless a probe at that point finds the device gone, in which case it returns `capture.ErrDeviceGone`; after a `*StallError` the stream must be closed and reopened. On Linux a device unplugged while `Read` is parked returns `capture.ErrDeviceGone`. On Linux `Open` on a device held by another application fails at once with `capture.ErrDeviceInUse` instead of waiting for it (a busy card that is no longer the unit a stable id resolved to is `capture.ErrDeviceGone`). The full list is under [Failure handling](#failure-handling).
 
 ### Device ids are stable
 
@@ -149,7 +149,7 @@ rs, err := capture.SupportedRates(devs[0].ID, 1, capture.FormatS16LE)
 // rs.Min, rs.Max == 192000, 384000                // raw HW_REFINE window
 ```
 
-If the device is held exclusively by another process the query returns `ErrDeviceInUse`; a channel/format combination the hardware cannot do at any rate returns `*BadFormatError`, which carries the channel range the device accepts for that format in `MinChannels` and `MaxChannels` (bounds only: a device taking 1, 2 or 8 channels reports 1..8); a missing device, or one removed during the query, returns `ErrDeviceGone`. In each case the caller should fall back to a static rate list. `SupportedRates` is Linux-only for now and returns `ErrCapabilitiesUnsupported` on other platforms.
+If the device is held exclusively by another process the query returns `ErrDeviceInUse` (`ErrDeviceGone` if the busy card is no longer the unit a stable id resolved to); a channel/format combination the hardware cannot do at any rate returns `*BadFormatError`, which carries the channel range the device accepts for that format in `MinChannels` and `MaxChannels` (bounds only: a device taking 1, 2 or 8 channels reports 1..8); a missing device, or one removed during the query, returns `ErrDeviceGone`. In each case the caller should fall back to a static rate list. `SupportedRates` is Linux-only for now and returns `ErrCapabilitiesUnsupported` on other platforms.
 
 `cmd/gac-rec` is a small debug recorder used for hardware validation:
 
@@ -207,7 +207,7 @@ What a caller sees for each failure, and what to do about it. Anything `Read` re
 | Rate not supported | `*BadRateError` (carries the supported range) | pick a supported rate; `SupportedRates` lists them on Linux |
 | Channel count or sample format not supported | `*BadFormatError` (Linux: carries the accepted channel range) | pick another layout |
 | Period geometry refused (Linux) | `*GeometryError` (wraps the driver's errno) | pass other `PeriodFrames`/`Periods`, or another rate or format; `SupportedRatesVerified` lists the rates that commit at the default geometry |
-| Device held by another application | `ErrDeviceInUse`, returned at once | retry later with a backoff |
+| Device held by another application | `ErrDeviceInUse`, returned at once (on Linux, a busy card that is no longer the unit a stable id resolved to is `ErrDeviceGone`) | retry later with a backoff |
 | Exclusive access disabled for the endpoint (Windows) | `ErrExclusiveNotAllowed` | the user changes the endpoint setting |
 | Configured device not attached, or the `DeviceInfo` passed to `OpenDevice` no longer names the card it was resolved to (Linux) | `ErrDeviceGone` (`*DeviceNotFoundError` for a stable id on Linux) | wait for it to reappear (`Resolve` again), then open |
 | `DeviceInfo` passed to `OpenDevice` is empty or inconsistent | `*ConfigError` (empty `ID`), `*BadDeviceError` (`ID`, `PortID`, `Card` and `Device` disagree, Linux) | pass a `DeviceInfo` from `Devices` or `Resolve` |

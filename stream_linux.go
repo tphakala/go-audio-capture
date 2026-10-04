@@ -62,7 +62,8 @@ type Stream struct {
 // it matches more than one, *BadRateError for an unsupported rate,
 // *BadFormatError for an unsupported channel/format combination,
 // *GeometryError when the device refuses every period geometry near the
-// requested one, ErrDeviceInUse
+// requested one, ErrDeviceInUse (ErrDeviceGone on a busy card that is no longer
+// the unit a stable id resolved to)
 // when another application holds the device (Open fails at once rather than
 // waiting for it to be released), and ErrDeviceGone when the device is missing or
 // was removed. A caller that already holds a DeviceInfo can use OpenDevice to
