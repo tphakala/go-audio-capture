@@ -192,7 +192,7 @@ func SupportedRatesVerified(device string, channels int, format Format) (RateSup
 // one PVERSION probe tells a device removed mid-query (ErrDeviceGone) from an
 // ordinary state error, which is returned unchanged. It must run before the
 // query's deferred Close: a probe on a closed PCM fails with EBADF and would
-// read as a present device.
+// not read as gone.
 func queryError(p prober, err error) error {
 	if errors.Is(err, unix.EBADFD) && deviceDisconnected(p) {
 		return ErrDeviceGone

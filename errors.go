@@ -32,10 +32,11 @@ var ErrDeviceInUse = errors.New("capture: device is in use by another applicatio
 // Close.
 var ErrDeviceGone = errors.New("capture: device is gone")
 
-// ErrDeviceStalled reports that the device is present but stopped delivering
-// audio (one PVERSION probe confirms it still answers; a device found gone is
-// reported as ErrDeviceGone instead): Stream.Read on Linux returns it (wrapped
-// in a *StallError) when a read stall repeats after a restart, or when recovery
+// ErrDeviceStalled reports that the device stopped delivering audio while a
+// PVERSION probe did not find it gone (a device the probe finds gone is
+// reported as ErrDeviceGone instead; an answered probe does not prove the
+// device is healthy): Stream.Read on Linux returns it (wrapped in a
+// *StallError) when a read stall repeats after a restart, or when recovery
 // repeats without any frames being delivered. The stream is unusable; Close it
 // and Open a new one. Windows does not return it yet.
 var ErrDeviceStalled = errors.New("capture: device stopped delivering audio")

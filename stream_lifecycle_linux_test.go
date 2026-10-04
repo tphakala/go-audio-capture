@@ -352,8 +352,8 @@ func TestReadUnrecoverableAfterRecoveriesIsClassified(t *testing.T) {
 }
 
 // TestReadRecoveryCapProbesForDeviceGone pins that a Read reaching its recovery
-// cap probes once: a device found gone is ErrDeviceGone, a present one keeps
-// the *StallError, and the probe is not a recovery.
+// cap probes once: a device found gone is ErrDeviceGone, one not found gone
+// keeps the *StallError, and the probe is not a recovery.
 func TestReadRecoveryCapProbesForDeviceGone(t *testing.T) {
 	triggers := []struct {
 		name     string

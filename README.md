@@ -200,8 +200,8 @@ What a caller sees for each failure, and what to do about it. Anything `Read` re
 | Two identical units with one serial (Linux) | `*AmbiguousDeviceError` | configure one of the listed ids |
 | Overrun, consumer too slow | none: recovered and counted in `Xruns()` | watch the counter |
 | System suspend and resume (Linux) | none: recovered and counted | nothing |
-| Driver stops delivering audio (Linux) | one restart, counted; if it happens again, `*StallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone) | close and reopen |
-| Recovery keeps failing with no audio (Linux) | `*StallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone) | close and reopen |
+| Driver stops delivering audio (Linux) | one restart, counted; if it happens again, `*StallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone) | close and reopen; on `ErrDeviceGone`, close and wait for the device to reappear |
+| Recovery keeps failing with no audio (Linux) | `*StallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone) | close and reopen; on `ErrDeviceGone`, close and wait for the device to reappear |
 | Device unplugged during capture | `ErrDeviceGone` | close, wait for the device to reappear |
 | `Close` called from another goroutine | `ErrClosed` | stop reading |
 

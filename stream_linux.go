@@ -235,8 +235,8 @@ func (s *Stream) terminalError(err error) error {
 // stallError builds the error for a Read that exhausted its recovery budget.
 // A USB device can die during a burst of overruns or stalls without
 // READI_FRAMES ever returning ENODEV or EBADFD, so one PVERSION probe tells a
-// vanished device (ErrDeviceGone, retire it) from a present one that stopped
-// delivering (*StallError, reopen it). s.closed is checked after the probe:
+// vanished device (ErrDeviceGone, retire it) from one the probe did not find
+// gone (*StallError, reopen it). s.closed is checked after the probe:
 // a Close racing it fails the probe with EBADF, and a Close always wins.
 func (s *Stream) stallError(recoveries int, err error) error {
 	gone := deviceDisconnected(s.pcm)

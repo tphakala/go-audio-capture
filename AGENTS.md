@@ -63,8 +63,8 @@ This is the robustness contract. A change to any row is a behaviour change and n
 | Exclusive access disabled for the endpoint | n/a | `ErrExclusiveNotAllowed` | user changes the endpoint setting |
 | Overrun (consumer too slow) | recovered inside `Read`, counted in `Xruns()` | counted in `Xruns()` | nothing; watch the counter |
 | System suspend/resume | resumed or re-prepared inside `Read`, counted | n/a | nothing |
-| Read stall (driver stops delivering, kernel read timeout `EIO`) | one restart inside `Read`, counted; a second stall returns `*StallError` (`ErrDeviceStalled`); `ErrDeviceGone` instead when a `PVERSION` probe at that point shows the device gone | not detected yet | close and reopen |
-| Recovery keeps failing with no frames (9th recoverable failure in one gap) | `*StallError` (`ErrDeviceStalled`); `ErrDeviceGone` instead when a `PVERSION` probe at that point shows the device gone | n/a | close and reopen |
+| Read stall (driver stops delivering, kernel read timeout `EIO`) | one restart inside `Read`, counted; a second stall returns `*StallError` (`ErrDeviceStalled`); `ErrDeviceGone` instead when a `PVERSION` probe at that point shows the device gone | not detected yet | close and reopen; on `ErrDeviceGone`, close and wait for the device to reappear |
+| Recovery keeps failing with no frames (9th recoverable failure in one gap) | `*StallError` (`ErrDeviceStalled`); `ErrDeviceGone` instead when a `PVERSION` probe at that point shows the device gone | n/a | close and reopen; on `ErrDeviceGone`, close and wait for the device to reappear |
 | Device unplugged mid-stream | `ErrDeviceGone`, including while `Read` is parked and when the device vanishes during a recovery burst | `ErrDeviceGone` once `GetBuffer` sees the invalidation; a parked `Read` is not woken yet | close; wait for the device to reappear |
 | `Close` from another goroutine | `ErrClosed` | `ErrClosed` | stop reading |
 
