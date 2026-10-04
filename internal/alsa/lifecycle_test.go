@@ -387,3 +387,24 @@ func TestOpenPCMClosesFdWhenClearFails(t *testing.T) {
 		t.Errorf("fd %d still open after a failed clear (F_GETFD err = %v)", fd, err)
 	}
 }
+
+func TestIsRecoverable(t *testing.T) {
+	for _, tt := range []struct {
+		err  error
+		want bool
+	}{
+		{unix.EPIPE, true},
+		{unix.ESTRPIPE, true},
+		{unix.EIO, true},
+		{&ioctlError{Op: "x", Err: unix.EPIPE}, true},
+		{unix.ENODEV, false},
+		{unix.EBADFD, false},
+		{unix.EBADF, false},
+		{unix.EINVAL, false},
+		{nil, false},
+	} {
+		if got := IsRecoverable(tt.err); got != tt.want {
+			t.Errorf("IsRecoverable(%v) = %v, want %v", tt.err, got, tt.want)
+		}
+	}
+}

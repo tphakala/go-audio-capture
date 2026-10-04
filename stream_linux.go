@@ -177,9 +177,9 @@ func (s *Stream) Read(buf []byte) (int, error) {
 		if err == nil {
 			return n, nil
 		}
-		// EBADF and EBADFD are never recoverable: they mean a Close or an
-		// unplug, which terminalError tells apart.
-		if s.closed.Load() || errors.Is(err, unix.EBADF) || errors.Is(err, unix.EBADFD) {
+		// Only errnos Recover can act on count against the budget; anything
+		// else (a Close, an unplug, a state error) is classified at once.
+		if s.closed.Load() || !alsa.IsRecoverable(err) {
 			return 0, s.terminalError(err)
 		}
 		stall := errors.Is(err, unix.EIO)

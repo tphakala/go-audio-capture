@@ -147,6 +147,14 @@ func IsDeviceGone(err error) bool {
 	return errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENOENT)
 }
 
+// IsRecoverable reports whether err (or an error it wraps) is one Recover
+// handles: EPIPE (overrun), ESTRPIPE (suspend) or EIO (stall). It is the single
+// source of truth for that set, so Stream.Read counts against its recovery
+// budget exactly the errnos Recover can act on.
+func IsRecoverable(err error) bool {
+	return errors.Is(err, unix.EPIPE) || errors.Is(err, unix.ESTRPIPE) || errors.Is(err, unix.EIO)
+}
+
 // newPCM builds a PCM and wires the condition variable to the mutex. It is the
 // single construction point (production and tests) so the sync.Cond is always
 // wired before the *PCM is published.
@@ -356,19 +364,18 @@ func (p *PCM) ReadI(buf []byte, frames int) (int, error) {
 //     then PREPARE+START.
 //   - anything else is returned unchanged as unrecoverable.
 func (p *PCM) Recover(err error) error {
+	if !IsRecoverable(err) {
+		return err
+	}
 	switch {
-	case errors.Is(err, unix.EPIPE):
-		return p.restart()
 	case errors.Is(err, unix.ESTRPIPE):
 		return p.resume()
 	case errors.Is(err, unix.EIO):
 		if e := p.control(iocDrop, "DROP"); e != nil {
 			return e
 		}
-		return p.restart()
-	default:
-		return err
 	}
+	return p.restart()
 }
 
 // restart re-prepares and starts the stream.

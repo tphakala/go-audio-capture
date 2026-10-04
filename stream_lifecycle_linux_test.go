@@ -280,3 +280,26 @@ func TestOpenNegotiateEBADFDPresentDevice(t *testing.T) {
 		t.Errorf("Close calls = %d, want 1", fp.closeCalls)
 	}
 }
+
+// TestReadUnrecoverableAfterRecoveriesIsClassified pins that the recovery
+// budget counts only errnos Recover can handle: an unplug (ENODEV) arriving as
+// the ninth failure in one gap is ErrDeviceGone, not a stall.
+func TestReadUnrecoverableAfterRecoveriesIsClassified(t *testing.T) {
+	errs := append(slices.Repeat([]error{unix.EPIPE}, maxRecoveriesWithoutData), unix.ENODEV)
+	var recovered []error
+	fp := &fakePCM{recoverFn: okRecover(&recovered)}
+	fp.readFn = guardedRead(func(call int) (int, error) {
+		if call <= len(errs) {
+			return 0, errs[call-1]
+		}
+		return 480, nil
+	})
+	s := openLifecycleStream(t, fp)
+	_, err := s.Read(make([]byte, 96))
+	if !errors.Is(err, ErrDeviceGone) || errors.Is(err, ErrDeviceStalled) {
+		t.Errorf("Read = %v, want ErrDeviceGone", err)
+	}
+	if len(recovered) != maxRecoveriesWithoutData {
+		t.Errorf("Recover calls = %d, want %d", len(recovered), maxRecoveriesWithoutData)
+	}
+}
