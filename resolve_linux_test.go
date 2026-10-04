@@ -54,8 +54,8 @@ func TestResolveDeviceNotFound(t *testing.T) {
 		"usb:16d0:06f3:s=0384_2474750763FA81C9:if=0,7", // present card, absent pcm
 	} {
 		_, err := resolveForOpen(id)
-		var nf *DeviceNotFoundError
-		if !errors.As(err, &nf) {
+		nf, ok := errors.AsType[*DeviceNotFoundError](err)
+		if !ok {
 			t.Errorf("resolveForOpen(%q) err = %v, want *DeviceNotFoundError", id, err)
 			continue
 		}
@@ -88,8 +88,8 @@ func TestResolveDeviceAmbiguous(t *testing.T) {
 
 	id := "usb:16d0:06f3:s=DUPLICATE:if=0,0"
 	_, err := resolveForOpen(id)
-	var amb *AmbiguousDeviceError
-	if !errors.As(err, &amb) {
+	amb, ok := errors.AsType[*AmbiguousDeviceError](err)
+	if !ok {
 		t.Fatalf("resolveForOpen(%q) err = %v, want *AmbiguousDeviceError", id, err)
 	}
 	if len(amb.Matches) != 2 {
@@ -146,8 +146,8 @@ func TestResolveDeviceMalformed(t *testing.T) {
 		"hw:NOTAKEY=Loopback",        // wrong key
 	} {
 		_, err := resolveForOpen(id)
-		var bde *BadDeviceError
-		if !errors.As(err, &bde) {
+		bde, ok := errors.AsType[*BadDeviceError](err)
+		if !ok {
 			t.Errorf("resolveForOpen(%q) err = %v, want *BadDeviceError", id, err)
 			continue
 		}
@@ -175,8 +175,8 @@ func TestBadDeviceErrorCarriesReason(t *testing.T) {
 	reason := func(id string) string {
 		t.Helper()
 		_, err := resolveForOpen(id)
-		var bde *BadDeviceError
-		if !errors.As(err, &bde) {
+		bde, ok := errors.AsType[*BadDeviceError](err)
+		if !ok {
 			t.Fatalf("resolveForOpen(%q) err = %v, want *BadDeviceError", id, err)
 		}
 		if bde.Err == nil {
@@ -233,8 +233,7 @@ func TestResolveExported(t *testing.T) {
 	t.Run("absent numeric id is not found and unwraps to ErrDeviceGone", func(t *testing.T) {
 		useFixture(t, hostLayout())
 		_, err := Resolve("hw:9,0")
-		var nf *DeviceNotFoundError
-		if !errors.As(err, &nf) {
+		if _, ok := errors.AsType[*DeviceNotFoundError](err); !ok {
 			t.Errorf("Resolve(hw:9,0) err = %v, want *DeviceNotFoundError", err)
 		}
 		if !errors.Is(err, ErrDeviceGone) {
@@ -245,8 +244,7 @@ func TestResolveExported(t *testing.T) {
 	t.Run("malformed id is a BadDeviceError", func(t *testing.T) {
 		useFixture(t, hostLayout())
 		_, err := Resolve("usb:16d0:06f3:s=SN:if=x,0")
-		var bde *BadDeviceError
-		if !errors.As(err, &bde) {
+		if _, ok := errors.AsType[*BadDeviceError](err); !ok {
 			t.Errorf("Resolve(malformed) err = %v, want *BadDeviceError", err)
 		}
 	})
@@ -259,8 +257,7 @@ func TestResolveExported(t *testing.T) {
 		}
 		useFixture(t, []fakeCard{twin(1, "3"), twin(2, "4")})
 		_, err := Resolve("usb:16d0:06f3:s=DUPLICATE:if=0,0")
-		var amb *AmbiguousDeviceError
-		if !errors.As(err, &amb) {
+		if _, ok := errors.AsType[*AmbiguousDeviceError](err); !ok {
 			t.Errorf("Resolve(ambiguous) err = %v, want *AmbiguousDeviceError", err)
 		}
 	})
@@ -588,8 +585,8 @@ func TestResolveAmbiguousFallsBackToHWAddr(t *testing.T) {
 
 	id := "usb:16d0:06f3:s=DUPLICATE:if=0,0"
 	_, err := resolveForOpen(id)
-	var amb *AmbiguousDeviceError
-	if !errors.As(err, &amb) {
+	amb, ok := errors.AsType[*AmbiguousDeviceError](err)
+	if !ok {
 		t.Fatalf("resolveForOpen(%q) err = %v, want *AmbiguousDeviceError", id, err)
 	}
 	if len(amb.Matches) != 2 {

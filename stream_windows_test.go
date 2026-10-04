@@ -246,16 +246,16 @@ func TestOpenTranslatesNegotiateErrors(t *testing.T) {
 			"bad rate",
 			&wasapi.BadRateError{Requested: 256000, Min: 44100, Max: 96000},
 			func(e error) bool {
-				var b *BadRateError
-				return errors.As(e, &b) && b.Requested == 256000 && b.Min == 44100 && b.Max == 96000
+				b, ok := errors.AsType[*BadRateError](e)
+				return ok && b.Requested == 256000 && b.Min == 44100 && b.Max == 96000
 			},
 		},
 		{
 			"bad format",
 			&wasapi.BadFormatError{Rate: 48000, Channels: 1, Format: wasapi.SampleS16},
 			func(e error) bool {
-				var b *BadFormatError
-				return errors.As(e, &b) && b.Rate == 48000 && b.Channels == 1 && b.Format == FormatS16LE
+				b, ok := errors.AsType[*BadFormatError](e)
+				return ok && b.Rate == 48000 && b.Channels == 1 && b.Format == FormatS16LE
 			},
 		},
 		{

@@ -53,8 +53,7 @@ func TestResolveDeviceNumeric(t *testing.T) {
 	for _, tt := range tests {
 		r, err := resolveForOpen(tt.in)
 		if tt.wantErr {
-			var bde *BadDeviceError
-			if !errors.As(err, &bde) {
+			if bde, ok := errors.AsType[*BadDeviceError](err); !ok {
 				t.Errorf("resolveForOpen(%q) err = %v, want *BadDeviceError", tt.in, err)
 			} else if bde.Err == nil {
 				t.Errorf("resolveForOpen(%q): BadDeviceError.Err is nil, want a threaded reason", tt.in)
@@ -341,8 +340,8 @@ func TestCheapChecksPrecedeResolution(t *testing.T) {
 		if errors.Is(err, ErrDeviceGone) {
 			t.Fatalf("err = %v, want a config error before resolution; a resolution error means the enumeration was not skipped", err)
 		}
-		var ce *ConfigError
-		if !errors.As(err, &ce) {
+		ce, ok := errors.AsType[*ConfigError](err)
+		if !ok {
 			t.Fatalf("err = %v, want *ConfigError", err)
 		}
 		if ce.Field != field {
@@ -366,8 +365,7 @@ func TestCheapChecksPrecedeResolution(t *testing.T) {
 		if errors.Is(err, ErrDeviceGone) {
 			t.Fatalf("Open err = %v, want a format error before resolution (enumeration not skipped)", err)
 		}
-		var bde *BadDeviceError
-		if errors.As(err, &bde) {
+		if _, ok := errors.AsType[*BadDeviceError](err); ok {
 			t.Fatalf("Open err = %v, want a format error, not a device-id error (resolution should be skipped)", err)
 		}
 	})
@@ -487,8 +485,8 @@ func TestOpenMapsUnsupportedFormat(t *testing.T) {
 	fp := &fakePCM{negErr: &alsa.BadFormatError{Channels: 1, Format: alsa.FormatS16LE}}
 	defer swapOpenPCM(fp)()
 	_, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS16LE})
-	var bfe *BadFormatError
-	if !errors.As(err, &bfe) {
+	bfe, ok := errors.AsType[*BadFormatError](err)
+	if !ok {
 		t.Fatalf("Open with unsupported format = %v, want *BadFormatError", err)
 	}
 	if bfe.Channels != 1 || bfe.Format != FormatS16LE || bfe.Rate != 0 {
@@ -505,8 +503,8 @@ func TestOpenMapsUnsupportedFormatWithRange(t *testing.T) {
 	fp := &fakePCM{negErr: &alsa.BadFormatError{Channels: 1, Format: alsa.FormatS32LE, MinChannels: 4, MaxChannels: 4}}
 	defer swapOpenPCM(fp)()
 	_, err := Open(Config{Device: hwAddrCard1, Rate: 48000, Channels: 1, Format: FormatS32LE})
-	var bfe *BadFormatError
-	if !errors.As(err, &bfe) {
+	bfe, ok := errors.AsType[*BadFormatError](err)
+	if !ok {
 		t.Fatalf("Open with unsupported format = %v, want *BadFormatError", err)
 	}
 	if bfe.MinChannels != 4 || bfe.MaxChannels != 4 {
@@ -520,8 +518,8 @@ func TestOpenMapsGeometryError(t *testing.T) {
 	fp := &fakePCM{negErr: &alsa.GeometryError{Rate: 44100, PeriodFrames: 896, Periods: 4, Err: unix.EINVAL}}
 	defer swapOpenPCM(fp)()
 	_, err := Open(Config{Device: hwAddrCard1, Rate: 44100, Channels: 2, Format: FormatS16LE})
-	var ge *GeometryError
-	if !errors.As(err, &ge) {
+	ge, ok := errors.AsType[*GeometryError](err)
+	if !ok {
 		t.Fatalf("Open = %v, want *GeometryError", err)
 	}
 	if ge.Rate != 44100 || ge.PeriodFrames != 896 || ge.Periods != 4 {
@@ -530,9 +528,9 @@ func TestOpenMapsGeometryError(t *testing.T) {
 	if !errors.Is(err, unix.EINVAL) {
 		t.Errorf("GeometryError does not unwrap to EINVAL: %v", err)
 	}
-	var bre *BadRateError
-	var ce *ConfigError
-	if errors.As(err, &bre) || errors.As(err, &ce) {
+	_, isRate := errors.AsType[*BadRateError](err)
+	_, isConfig := errors.AsType[*ConfigError](err)
+	if isRate || isConfig {
 		t.Errorf("geometry refusal reported as %T", err)
 	}
 }
@@ -543,8 +541,8 @@ func TestOpenMapsBadRate(t *testing.T) {
 	fp := &fakePCM{negErr: &alsa.BadRateError{Requested: 256000, Min: 44100, Max: 96000}}
 	defer swapOpenPCM(fp)()
 	_, err := Open(Config{Device: hwAddrCard1, Rate: 256000, Channels: 2, Format: FormatS32LE})
-	var bre *BadRateError
-	if !errors.As(err, &bre) {
+	bre, ok := errors.AsType[*BadRateError](err)
+	if !ok {
 		t.Fatalf("Open with bad rate = %v, want *BadRateError", err)
 	}
 	if bre.Requested != 256000 || bre.Min != 44100 || bre.Max != 96000 {

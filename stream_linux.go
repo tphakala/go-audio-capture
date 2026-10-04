@@ -281,12 +281,10 @@ func alsaFormat(f Format) (uint32, error) {
 // translateQueryError so Open and SupportedRates classify a busy or lost device
 // the same way. Anything else is returned unchanged.
 func translateOpenError(err error, channels int, format Format) error {
-	var bre *alsa.BadRateError
-	if errors.As(err, &bre) {
+	if bre, ok := errors.AsType[*alsa.BadRateError](err); ok {
 		return &BadRateError{Requested: bre.Requested, Min: bre.Min, Max: bre.Max}
 	}
-	var bfe *alsa.BadFormatError
-	if errors.As(err, &bfe) {
+	if bfe, ok := errors.AsType[*alsa.BadFormatError](err); ok {
 		return &BadFormatError{Channels: channels, Format: format, MinChannels: bfe.MinChannels, MaxChannels: bfe.MaxChannels}
 	}
 	if ge, ok := errors.AsType[*alsa.GeometryError](err); ok {

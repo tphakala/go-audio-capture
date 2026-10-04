@@ -74,11 +74,11 @@ func minMallocsPerWindow(tb testing.TB, c *Client, buf []byte) uint64 {
 		tb.Fatalf("positive-control fill = (%d frames, %v), want frames>0 and no error", frames, err)
 	}
 	best := ^uint64(0)
-	for w := 0; w < allocWindows; w++ {
+	for range allocWindows {
 		var m0, m1 runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&m0)
-		for i := 0; i < allocWindowIters; i++ {
+		for range allocWindowIters {
 			if _, _, err := c.fill(buf); err != nil {
 				tb.Fatalf("fill: %v", err)
 			}
@@ -130,7 +130,7 @@ func TestFillZeroAllocSilentOverflow(t *testing.T) {
 // count leaves the carry fully drained.
 func warmCarry(tb testing.TB, c *Client, buf []byte) {
 	tb.Helper()
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		if _, _, err := c.fill(buf); err != nil {
 			tb.Fatal(err)
 		}
@@ -142,8 +142,7 @@ func warmCarry(tb testing.TB, c *Client, buf []byte) {
 func BenchmarkFillSteadyState(b *testing.B) {
 	c, buf := benchClient(480, 480)
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, _, err := c.fill(buf); err != nil {
 			b.Fatal(err)
 		}
@@ -155,8 +154,7 @@ func BenchmarkFillSteadyState(b *testing.B) {
 func BenchmarkFillOverflow(b *testing.B) {
 	c, buf := benchClient(480, 240)
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, _, err := c.fill(buf); err != nil {
 			b.Fatal(err)
 		}

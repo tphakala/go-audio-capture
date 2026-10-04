@@ -53,7 +53,7 @@ func Resolve(id string) (DeviceInfo, error) {
 			// A not-found default endpoint (no capture device present at all) is
 			// the resolve-time "device absent" case this function documents:
 			// surface it as *DeviceNotFoundError, which unwraps to ErrDeviceGone,
-			// so both errors.Is(err, ErrDeviceGone) and errors.As(&DeviceNotFoundError{})
+			// so both errors.Is(err, ErrDeviceGone) and errors.AsType[*DeviceNotFoundError](err)
 			// hold as promised. Any other failure is a real COM error, returned as is.
 			if errors.Is(err, wasapi.ErrDeviceGone) {
 				return DeviceInfo{}, &DeviceNotFoundError{ID: id}

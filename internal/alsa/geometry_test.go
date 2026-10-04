@@ -406,9 +406,9 @@ func TestNegotiateGeometryRefinePassesThroughDeviceGone(t *testing.T) {
 				return d.ioctl(fd, req, arg)
 			}
 			_, err := newPCM(-1, fake).Negotiate(44100, 2, FormatS16LE, 880, 4)
-			var bre *BadRateError
-			var ge *GeometryError
-			if errors.As(err, &bre) || errors.As(err, &ge) || !errors.Is(err, errno) {
+			_, isRate := errors.AsType[*BadRateError](err)
+			_, isGeometry := errors.AsType[*GeometryError](err)
+			if isRate || isGeometry || !errors.Is(err, errno) {
 				t.Errorf("%v at refine #%d: err = %v, want it to unwrap to the errno and be neither *BadRateError nor *GeometryError", errno, k, err)
 			}
 		}
@@ -426,8 +426,8 @@ func TestNegotiateRejectsSubstitutedRate(t *testing.T) {
 		return nil
 	}
 	_, err := newPCM(-1, fake).Negotiate(48000, 1, FormatS16LE, 960, 4)
-	var bre *BadRateError
-	if !errors.As(err, &bre) || bre.Requested != 48000 {
+	bre, ok := errors.AsType[*BadRateError](err)
+	if !ok || bre.Requested != 48000 {
 		t.Fatalf("Negotiate err = %v, want *BadRateError for 48000", err)
 	}
 }
@@ -446,8 +446,8 @@ func TestNegotiateNoAttainableGeometryIsGeometryError(t *testing.T) {
 		return narrowDevice(arg, 8000, 192000)
 	}
 	_, err := newPCM(-1, fake).Negotiate(48000, 2, FormatS16LE, 960, 4)
-	var ge *GeometryError
-	if !errors.As(err, &ge) || !errors.Is(err, unix.EINVAL) {
+	ge, ok := errors.AsType[*GeometryError](err)
+	if !ok || !errors.Is(err, unix.EINVAL) {
 		t.Fatalf("Negotiate err = %v, want *GeometryError wrapping EINVAL", err)
 	}
 	if ge.Rate != 48000 || ge.PeriodFrames != 960 || ge.Periods != 4 {
@@ -561,8 +561,8 @@ func TestNegotiateBadFormatReportsChannelRange(t *testing.T) {
 	d := plainDevice()
 	d.chLo, d.chHi = 2, 2
 	_, err := newPCM(-1, d.ioctl).Negotiate(48000, 1, FormatS16LE, 960, 4)
-	var bfe *BadFormatError
-	if !errors.As(err, &bfe) {
+	bfe, ok := errors.AsType[*BadFormatError](err)
+	if !ok {
 		t.Fatalf("Negotiate err = %v, want *BadFormatError", err)
 	}
 	if bfe.MinChannels != 2 || bfe.MaxChannels != 2 {
@@ -574,8 +574,8 @@ func TestNegotiateBadFormatUnsupportedFormat(t *testing.T) {
 	d := plainDevice()
 	d.formats = []uint{FormatS32LE}
 	_, err := newPCM(-1, d.ioctl).Negotiate(48000, 2, FormatS16LE, 960, 4)
-	var bfe *BadFormatError
-	if !errors.As(err, &bfe) {
+	bfe, ok := errors.AsType[*BadFormatError](err)
+	if !ok {
 		t.Fatalf("Negotiate err = %v, want *BadFormatError", err)
 	}
 	if bfe.MinChannels != 0 || bfe.MaxChannels != 0 {
@@ -596,8 +596,7 @@ func TestNegotiateBadFormatProbePassesDeviceGone(t *testing.T) {
 		return unix.ENODEV // the channel-range probe finds the device gone
 	}
 	_, err := newPCM(-1, fake).Negotiate(48000, 1, FormatS16LE, 960, 4)
-	var bfe *BadFormatError
-	if errors.As(err, &bfe) || !errors.Is(err, unix.ENODEV) {
+	if _, ok := errors.AsType[*BadFormatError](err); ok || !errors.Is(err, unix.ENODEV) {
 		t.Fatalf("Negotiate err = %v, want ENODEV and not *BadFormatError", err)
 	}
 }
@@ -606,8 +605,8 @@ func TestSupportedRatesBadFormatReportsChannelRange(t *testing.T) {
 	d := plainDevice()
 	d.chLo, d.chHi = 4, 4
 	_, _, _, err := newPCM(-1, d.ioctl).SupportedRates(1, FormatS32LE, []int{48000})
-	var bfe *BadFormatError
-	if !errors.As(err, &bfe) {
+	bfe, ok := errors.AsType[*BadFormatError](err)
+	if !ok {
 		t.Fatalf("SupportedRates err = %v, want *BadFormatError", err)
 	}
 	if bfe.MinChannels != 4 || bfe.MaxChannels != 4 {

@@ -67,7 +67,7 @@ func Enumerate() ([]Endpoint, error) {
 		return nil, err
 	}
 	out := make([]Endpoint, 0, n)
-	for i := uint32(0); i < n; i++ {
+	for i := range n {
 		dev, err := collectionItem(coll, i)
 		if err != nil {
 			continue

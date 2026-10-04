@@ -54,7 +54,7 @@ func pcm16(frames int, v byte) []byte {
 // a delivered region's exact offset is pinned (a wrong offset changes the bytes).
 func pcm16seq(frames int, base byte) []byte {
 	b := make([]byte, frames*2)
-	for f := 0; f < frames; f++ {
+	for f := range frames {
 		b[2*f] = base + byte(f)
 		b[2*f+1] = base + byte(f)
 	}
@@ -242,7 +242,7 @@ func TestFillCarrySpansManyReads(t *testing.T) {
 	// 0 -> 4 (intermediate, no reset) -> 8 (drains, resets).
 	c, _ := fillClient(1, 16, []capturePacket{{data: pcm16seq(6, 0x10), frames: 6, devPos: 0}})
 	got := make([]byte, 0, 6*2)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		buf := make([]byte, 2*2)
 		n, _, err := c.fill(buf)
 		if err != nil {
@@ -298,7 +298,7 @@ func TestFillEmptyPacket(t *testing.T) {
 // contiguous packet stream, total delivered frames equal the device's advance.
 func TestFillContiguousMatchesDeviceAdvance(t *testing.T) {
 	pkts := make([]capturePacket, 0, 10)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		pkts = append(pkts, capturePacket{data: pcm16(4, byte(i)), frames: 4, devPos: uint64(i * 4)})
 	}
 	c, _ := fillClient(1, 16, pkts)

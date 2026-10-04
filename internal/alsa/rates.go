@@ -157,8 +157,7 @@ func (p *PCM) VerifyRate(channels int, format uint32, rate int) (bool, error) {
 	}
 
 	if err := p.refineGeometry(&hw, rate, DefaultPeriodFrames(rate), DefaultPeriods); err != nil {
-		var ge *GeometryError
-		if errors.Is(err, errRateRefused) || errors.As(err, &ge) {
+		if _, ok := errors.AsType[*GeometryError](err); ok || errors.Is(err, errRateRefused) {
 			return false, nil
 		}
 		return false, err
