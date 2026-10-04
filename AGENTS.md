@@ -120,7 +120,14 @@ Failure modes can be reproduced on real Linux hardware with `cmd/gac-rec`: hold 
 
 ## Commands
 
-Go 1.27, golangci-lint v2.13.2 (pinned in CI). Tasks are in `Taskfile.yml`.
+Go 1.27, golangci-lint v2.14.0 (pinned in CI). Tasks are in `Taskfile.yml`.
+
+The project targets the latest stable Go release and the latest tooling, not the oldest version that still works:
+
+- `go.mod` and CI track the newest Go minor release. CI's `go-version: '1.27'` resolves to the newest patch on every run; when a new minor ships, bump `go.mod`, `GO_VERSION` in `.github/workflows/ci.yml` and the `go-version` in `govulncheck.yml` together.
+- golangci-lint is pinned to its newest release in `GOLANGCI_LINT_VERSION` in `ci.yml` and in this file, and bumped by hand when a release ships (Dependabot does not see that string). Fix any new findings in the same change rather than disabling the linter.
+- Dependabot keeps Go module dependencies and GitHub Actions current; merge its PRs once CI passes.
+- New and changed code uses current language and standard library features where they make it simpler (`go fix -diff ./...`, also with `GOOS=windows`, lists older idioms the modernizers would replace). Do not add shims or build tags for older Go releases.
 
 ```
 task check        # full local gate: cross-builds (amd64/arm64/arm/386/riscv64/loong64, CGO off),
@@ -172,6 +179,5 @@ Intentional, do not flag:
 
 ## Things that do not belong in the repo
 
-- Design docs, plans and specs: `/docs/` is gitignored and kept private. Do not commit planning documents anywhere in the tree.
 - Raw captures (`*.wav`, `*.raw`, `/testdata/captures/`): may contain LAN details. Commit only scrubbed fixtures under `testdata/`.
 - Editor and agent state (`.serena/`, `.claude/`, `.codegraph/`) and build outputs (`*.test`, `*.exe`).
