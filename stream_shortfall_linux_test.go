@@ -345,3 +345,26 @@ func TestShortfallThresholdIsTolerancePlusBuffer(t *testing.T) {
 		})
 	}
 }
+
+func TestShortfallLongGapDoesNotOverflowExpected(t *testing.T) {
+	// A read that returns days after the window started: elapsed_ns x rate would
+	// wrap int64 (at 48 kHz after about 53 hours) and make the expected count
+	// negative, so the shortfall would pass unnoticed.
+	c := withFakeClock(t)
+	fp := &fakePCM{}
+	fp.readFn = func() (int, error) { return shortfallPeriod, nil }
+	s, buf := newShortfallStream(t, fp, 0, 0)
+	if _, err := s.Read(buf); err != nil {
+		t.Fatalf("first Read: %v", err)
+	}
+	const gap = 4 * 24 * time.Hour
+	c.now += int64(gap)
+	_, err := s.Read(buf)
+	se, ok := errors.AsType[*ShortfallError](err)
+	if !ok {
+		t.Fatalf("Read after a %s gap = %v, want *ShortfallError", gap, err)
+	}
+	if want := int64(gap/time.Second) * shortfallRate; se.Expected != want {
+		t.Errorf("Expected = %d, want %d", se.Expected, want)
+	}
+}

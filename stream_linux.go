@@ -376,10 +376,14 @@ func (s *Stream) checkShortfall(n int) error {
 		return nil
 	}
 	rate := int64(s.cfg.Rate)
-	expected := elapsed * rate / int64(time.Second) // 2e9 ns x 768000 Hz fits int64, not a 32-bit int
+	// Whole seconds and the remainder are scaled apart: elapsed is the gap since
+	// the last evaluation, and elapsed * rate overflows int64 once that gap passes
+	// a few hours at 384 kHz.
+	secs, rem := elapsed/int64(time.Second), elapsed%int64(time.Second)
+	expected := secs*rate + rem*rate/int64(time.Second)
 	delivered := s.winFrames
 	s.winStart, s.winFrames = now, 0
-	if delivered+s.bufferFrames >= expected*(100-shortfallTolPercent)/100 {
+	if delivered+s.bufferFrames >= expected-expected*shortfallTolPercent/100 {
 		return nil
 	}
 	// Same classification as a recovery that keeps failing: one probe separates a
