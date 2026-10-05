@@ -83,7 +83,7 @@ for {
 }
 ```
 
-`Read` is single-consumer and blocking; `Close` may be called from another goroutine to unblock it. Overruns, resumes after a system suspend and restarted stalls are recovered internally and counted via `Stream.Xruns()`. On Linux recovery is bounded per `Read` call: a repeated stall, or a ninth recoverable failure (overrun, suspend or stall) after 8 recoveries without any frames delivered, returns a `*StallError` (`errors.Is(err, capture.ErrDeviceStalled)`) unless a probe at that point finds the device gone, in which case it returns `capture.ErrDeviceGone`; after a `*StallError` the stream must be closed and reopened. On Linux a device unplugged while `Read` is parked returns `capture.ErrDeviceGone`. On Linux `Open` on a device held by another application fails at once with `capture.ErrDeviceInUse` instead of waiting for it (a busy card that is no longer the unit a stable id resolved to is `capture.ErrDeviceGone`). The full list is under [Failure handling](#failure-handling).
+`Read` is single-consumer and blocking; `Close` may be called from another goroutine to unblock it. Overruns, resumes after a system suspend and restarted stalls are recovered internally and counted via `Stream.Xruns()`. On Linux recovery is bounded per `Read` call: a repeated stall, or a ninth recoverable failure (overrun, suspend or stall) after 8 recoveries without any frames delivered, returns a `*StallError` (`errors.Is(err, capture.ErrDeviceStalled)`) unless a probe at that point finds the device gone, in which case it returns `capture.ErrDeviceGone`; On Linux `Read` also compares the frames it delivers with wall-clock time and returns a `*ShortfallError` (also `errors.Is(err, capture.ErrDeviceStalled)`) when a device delivers markedly fewer frames than its rate implies; after a `*StallError` or `*ShortfallError` the stream must be closed and reopened. On Linux a device unplugged while `Read` is parked returns `capture.ErrDeviceGone`. On Linux `Open` on a device held by another application fails at once with `capture.ErrDeviceInUse` instead of waiting for it (a busy card that is no longer the unit a stable id resolved to is `capture.ErrDeviceGone`). The full list is under [Failure handling](#failure-handling).
 
 ### Device ids are stable
 
@@ -218,10 +218,11 @@ What a caller sees for each failure, and what to do about it. Anything `Read` re
 | System suspend and resume (Linux) | none: recovered and counted | nothing |
 | Driver stops delivering audio (Linux) | one restart, counted; if it happens again, `*StallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone) | close and reopen; on `ErrDeviceGone`, close and wait for the device to reappear |
 | Recovery keeps failing with no audio (Linux) | `*StallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone) | close and reopen; on `ErrDeviceGone`, close and wait for the device to reappear |
+| Device delivers fewer frames than its rate, with no overrun (Linux; some small period geometries make the driver's pointer run slow) | `*ShortfallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone), checked over a window of at least 2 s and 20 buffers, 10% tolerance plus one buffer | close and reopen, with a larger `PeriodFrames`/`Periods` if it repeats |
 | Device unplugged during capture | `ErrDeviceGone` | close, wait for the device to reappear |
 | `Close` called from another goroutine | `ErrClosed` | stop reading |
 
-Platform gaps: Windows does not detect a stalled driver yet, and a Windows `Read` parked while the endpoint is unplugged is not woken until `Close`.
+Platform gaps: Windows does not detect a stalled driver or a delivery shortfall yet, and a Windows `Read` parked while the endpoint is unplugged is not woken until `Close`.
 
 ## Performance vs malgo/miniaudio
 

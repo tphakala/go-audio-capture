@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ErrClosed is returned by Stream.Read once the stream has been closed.
@@ -38,8 +39,10 @@ var ErrDeviceGone = errors.New("capture: device is gone")
 // reported as ErrDeviceGone instead; an answered probe does not prove the
 // device is healthy): Stream.Read on Linux returns it (wrapped in a
 // *StallError) when a read stall repeats after a restart, or when recovery
-// repeats without any frames being delivered. The stream is unusable; Close it
-// and Open a new one. Windows does not return it yet.
+// repeats without any frames being delivered, and (wrapped in a *ShortfallError)
+// when the device delivers markedly fewer frames than its rate over a window of
+// wall-clock time. The stream is unusable; Close it and Open a new one. Windows
+// does not return it yet.
 var ErrDeviceStalled = errors.New("capture: device stopped delivering audio")
 
 // ErrCapabilitiesUnsupported reports that device capability queries such as
@@ -110,6 +113,35 @@ func (e *StallError) Error() string {
 
 // Unwrap reports ErrDeviceStalled and the last errno, so errors.Is matches both.
 func (e *StallError) Unwrap() []error { return []error{ErrDeviceStalled, e.Err} }
+
+// ShortfallError is returned by Stream.Read on Linux when the device delivered
+// markedly fewer frames than its sample rate implies over a window of wall-clock
+// time, with no overrun or other error to show for it. Some period geometries
+// make a driver's hardware pointer itself advance slower than real time, so the
+// reader keeps up with a pointer that is already short and the kernel reports
+// nothing. Rate is the negotiated sample rate. Window is the span of wall-clock
+// time that was measured (at least 2 s, and 20 times the buffer duration for a
+// large buffer). Expected is the number of frames Window and Rate imply, and
+// Delivered is the number of frames Read returned in it. The check allows for the
+// frames that sit in the buffer and a 10% tolerance, so a stream is flagged only
+// when it fell short by more than the tolerance plus one buffer.
+//
+// It unwraps to ErrDeviceStalled, so a caller that closes and reopens on a stall
+// handles it unchanged. Reopening with a larger PeriodFrames or Periods is the
+// remedy when the device keeps producing it.
+type ShortfallError struct {
+	Rate      int
+	Window    time.Duration
+	Expected  int64
+	Delivered int64
+}
+
+func (e *ShortfallError) Error() string {
+	return fmt.Sprintf("capture: device delivered %d of %d expected frames at %d Hz over %s", e.Delivered, e.Expected, e.Rate, e.Window)
+}
+
+// Unwrap reports ErrDeviceStalled, so errors.Is matches it.
+func (e *ShortfallError) Unwrap() error { return ErrDeviceStalled }
 
 // AmbiguousDeviceError reports a device id that matches more than one device
 // present right now, which happens when two identical units report the same
