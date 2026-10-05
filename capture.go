@@ -200,7 +200,11 @@ type RateSupport struct {
 // On Linux they are targets: the device may adjust them to the nearest values it
 // accepts (some drivers need the period in whole multiples of a block size),
 // Negotiated reports what it granted, and Open fails with *GeometryError when
-// nothing near them works.
+// nothing near them works. Before negotiating, Linux raises a period below 1 ms
+// to 1 ms and a buffer below 20 ms to 20 ms by adding periods, because smaller
+// geometries can capture fewer frames than real time without any overrun. The
+// device may still grant less than the raised values, and Negotiated reports
+// what it granted. Negative values are a *ConfigError on Linux.
 type Config struct {
 	// Device names the capture device. On Linux it accepts a DeviceInfo.ID in
 	// any of its stable forms ("usb:...", "hw:CARD=name,DEV=0"), which is what a
@@ -212,6 +216,6 @@ type Config struct {
 	Rate         int // requested sample rate in Hz
 	Channels     int // channel count the device captures; never up- or down-mixed
 	Format       Format
-	PeriodFrames int // frames per period; Linux: 0 => Rate/50 (20 ms); ignored on Windows
-	Periods      int // periods per buffer; Linux: 0 => 4; ignored on Windows
+	PeriodFrames int // frames per period; Linux: 0 => Rate/50 (20 ms), raised to at least 1 ms, negative rejected; ignored on Windows
+	Periods      int // periods per buffer; Linux: 0 => 4, raised to reach a 20 ms buffer, negative rejected; ignored on Windows
 }

@@ -54,9 +54,11 @@ type Stream struct {
 // Open configures and opens a capture stream. It negotiates the exact requested
 // rate (failing with *BadRateError otherwise), applies the 20 ms / 4-period
 // defaults, and returns a stream that is prepared but not yet started; call
-// Start before Read. The period size and count are buffering parameters: the
-// device may move them to the nearest values it accepts, and Negotiated reports
-// the result. On failure it returns a typed error: *BadDeviceError for a
+// Start before Read. The period size and count are buffering parameters: they
+// are raised to the floor in applyGeometryFloor, the device may then move them
+// to the nearest values it accepts, and Negotiated reports the result. A
+// negative PeriodFrames or Periods fails with *ConfigError. On failure it
+// returns a typed error: *BadDeviceError for a
 // malformed device id, *DeviceNotFoundError (which unwraps to ErrDeviceGone) when
 // a well-formed stable id matches no present device, *AmbiguousDeviceError when
 // it matches more than one, *BadRateError for an unsupported rate,
@@ -135,7 +137,35 @@ func validateStreamConfig(cfg Config) (uint32, error) {
 	if cfg.Channels < 1 {
 		return 0, &ConfigError{Field: "channels", Reason: "must be at least 1"}
 	}
+	// Zero means default; negative is rejected, not coerced.
+	if cfg.PeriodFrames < 0 {
+		return 0, &ConfigError{Field: "periodFrames", Reason: "must not be negative"}
+	}
+	if cfg.Periods < 0 {
+		return 0, &ConfigError{Field: "periods", Reason: "must not be negative"}
+	}
 	return alsaFormat(cfg.Format)
+}
+
+// applyGeometryFloor raises a requested geometry to at least a 1 ms period and
+// a 20 ms buffer; it never lowers either value. The kernel accepts smaller
+// geometries but can then deliver fewer frames than real time without any
+// overrun: snd-usb-audio sizes capture URBs to under a period, down to one
+// 125 us microframe for sub-ms periods, and a host that misses microframes
+// advances the hardware pointer by nothing; snd_pcm_update_hw_ptr0 sees the
+// pointer only modulo the buffer and corrects at most one wrap, and its jiffies
+// check runs only in xrun_debug mode, so a timer-driven driver (snd-aloop) that
+// moves a whole buffer between updates loses those frames silently. The buffer
+// floor is met by adding periods, not by growing the period: capture wake-up
+// latency follows the period (avail_min), so more periods cost only ring memory.
+// Inputs are already defaulted (all >= 1). The arithmetic never forms
+// periodFrames * periods or rate + 999, so it cannot overflow a 32-bit int.
+func applyGeometryFloor(rate, periodFrames, periods int) (frames, count int) {
+	periodFloor := 1 + (rate-1)/1000 // ceil(rate/1000): 1 ms
+	bufferFloor := 1 + (rate-1)/50   // ceil(rate/50): 20 ms
+	frames = max(periodFrames, periodFloor)
+	minPeriods := 1 + (bufferFloor-1)/frames
+	return frames, max(periods, minPeriods)
 }
 
 // openResolved opens the card r names, confirms it is still the unit r was
@@ -150,6 +180,7 @@ func openResolved(r resolved, cfg Config, format uint32) (*Stream, error) {
 	if periods == 0 {
 		periods = alsa.DefaultPeriods
 	}
+	periodFrames, periods = applyGeometryFloor(cfg.Rate, periodFrames, periods)
 
 	p, err := openPCM(r.card, r.device)
 	if err != nil {

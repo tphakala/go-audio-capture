@@ -92,9 +92,12 @@ type fakePCM struct {
 	closeCalls int
 	probeFn    func() error // result of Probe when set; nil means the device answers
 	probes     int
+
+	gotPeriodFrames, gotPeriods int // the geometry Negotiate was asked for
 }
 
 func (f *fakePCM) Negotiate(rate, channels int, format uint32, periodFrames, periods int) (alsa.Negotiated, error) {
+	f.gotPeriodFrames, f.gotPeriods = periodFrames, periods
 	if f.negErr != nil {
 		return alsa.Negotiated{}, f.negErr
 	}
