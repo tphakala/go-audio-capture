@@ -218,7 +218,7 @@ What a caller sees for each failure, and what to do about it. Anything `Read` re
 | System suspend and resume (Linux) | none: recovered and counted | nothing |
 | Driver stops delivering audio (Linux) | one restart, counted; if it happens again, `*StallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone) | close and reopen; on `ErrDeviceGone`, close and wait for the device to reappear |
 | Recovery keeps failing with no audio (Linux) | `*StallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone) | close and reopen; on `ErrDeviceGone`, close and wait for the device to reappear |
-| Device delivers fewer frames than its rate, with no overrun (Linux; some small period geometries make the driver's pointer run slow) | `*ShortfallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone), checked over a window of at least 2 s and 20 buffers, 10% tolerance plus one buffer | close and reopen; if it repeats at a small period geometry, use a larger `PeriodFrames`/`Periods` |
+| Device delivers fewer frames than its rate, with no overrun (Linux; some small period geometries make the driver's pointer run slow) | `*ShortfallError` (`ErrDeviceStalled`; `ErrDeviceGone` instead if the device turns out to be gone), checked over a window of at least 2 s and 20 buffers, 10% tolerance plus one buffer | close and reopen, with a larger `PeriodFrames`/`Periods` if it repeats |
 | Device unplugged during capture | `ErrDeviceGone` | close, wait for the device to reappear |
 | `Close` called from another goroutine | `ErrClosed` | stop reading |
 

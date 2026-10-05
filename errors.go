@@ -119,11 +119,7 @@ func (e *StallError) Unwrap() []error { return []error{ErrDeviceStalled, e.Err} 
 // time, with no overrun or other error to show for it. Some period geometries
 // make a driver's hardware pointer itself advance slower than real time, so the
 // reader keeps up with a pointer that is already short and the kernel reports
-// nothing. The check measures delivery only, so a gap in delivery that ends with
-// frames arriving again, and is longer than the tolerance plus one buffer below, is
-// flagged the same way; a device that never resumes ends in *StallError or
-// ErrDeviceGone instead.
-// Rate is the negotiated sample rate. Window is the span of wall-clock
+// nothing. Rate is the negotiated sample rate. Window is the span of wall-clock
 // time that was measured (at least 2 s, and 20 times the buffer duration for a
 // large buffer). Expected is the number of frames Window and Rate imply, and
 // Delivered is the number of frames Read returned in it. The check allows for the
@@ -132,8 +128,7 @@ func (e *StallError) Unwrap() []error { return []error{ErrDeviceStalled, e.Err} 
 //
 // It unwraps to ErrDeviceStalled, so a caller that closes and reopens on a stall
 // handles it unchanged. Reopening with a larger PeriodFrames or Periods is the
-// remedy when a small period geometry keeps producing it; a delivery gap with
-// another cause is not helped by it.
+// remedy when the device keeps producing it.
 type ShortfallError struct {
 	Rate      int
 	Window    time.Duration
