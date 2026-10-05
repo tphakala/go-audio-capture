@@ -5,6 +5,7 @@ package capture
 import (
 	"errors"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -41,6 +42,29 @@ var openPCM = func(card, device int) (pcm, error) {
 	return p, nil
 }
 
+// monoBase anchors monoNow. time.Since reads the monotonic clock, so wall-clock
+// steps (NTP, a manual change) cannot make the shortfall window look short or
+// long.
+var monoBase = time.Now()
+
+// monoNow returns monotonic nanoseconds. It is a package var so tests drive the
+// shortfall window with a fake clock instead of sleeping; the real one is a vDSO
+// read and does not allocate.
+var monoNow = func() int64 { return int64(time.Since(monoBase)) }
+
+// Shortfall check parameters. The hardware pointer of some drivers advances
+// slower than real time for a small period geometry, so ReadI keeps succeeding on
+// a pointer that is already short and no errno ever reports it. Read therefore
+// compares the frames it delivered with the wall-clock time that passed. The
+// window is at least minShortfallWindow and 20 buffers long: the buffer's worth
+// of frames that may sit unread is the check's slack, and at 20 buffers it is 5%
+// of the window, half the 10% tolerance, so a large buffer cannot hide a loss.
+const (
+	minShortfallWindow  = 2 * int64(time.Second)
+	shortfallWindowBufs = 20
+	shortfallTolPercent = 10
+)
+
 // Stream is an open capture stream. Read is single-consumer; Close may be
 // called from another goroutine to unblock a parked Read.
 type Stream struct {
@@ -49,6 +73,21 @@ type Stream struct {
 	frameBytes int
 	xruns      atomic.Uint64
 	closed     atomic.Bool
+
+	// Shortfall window, touched only by Read (single-consumer). See checkShortfall.
+	bufferFrames int64 // negotiated buffer size, the slack the check allows for
+	window       int64 // window length in ns: max(2 s, 20 x buffer duration)
+	winOn        bool  // the window has started (lazily, at a successful read)
+	winStart     int64 // monoNow at the window start
+	winFrames    int64 // frames Read returned since winStart
+}
+
+// shortfallWindow returns the shortfall window length in nanoseconds for a
+// stream that negotiated rate (always positive: validateStreamConfig) and
+// bufferFrames, in int64 so 32-bit builds do not overflow.
+func shortfallWindow(rate, bufferFrames int) int64 {
+	bufferNs := int64(bufferFrames) * int64(time.Second) / int64(rate)
+	return max(minShortfallWindow, shortfallWindowBufs*bufferNs)
 }
 
 // Open configures and opens a capture stream. It negotiates the exact requested
@@ -227,7 +266,9 @@ func openResolved(r resolved, cfg Config, format uint32) (*Stream, error) {
 			PeriodFrames: n.PeriodFrames,
 			Periods:      n.Periods,
 		},
-		frameBytes: cfg.Channels * cfg.Format.BytesPerSample(),
+		frameBytes:   cfg.Channels * cfg.Format.BytesPerSample(),
+		bufferFrames: int64(n.BufferFrames),
+		window:       shortfallWindow(n.Rate, n.BufferFrames),
 	}, nil
 }
 
@@ -256,7 +297,13 @@ func (s *Stream) Start() error {
 // more than a handful of recoveries without any frames being delivered, returns
 // a *StallError (which unwraps to ErrDeviceStalled and to the last errno); if
 // one PVERSION probe at that point finds the device gone, it returns
-// ErrDeviceGone instead. Read returns ErrClosed when the stream is closed and
+// ErrDeviceGone instead. Read also compares the frames it delivers with wall-clock
+// time: over a window of at least 2 s (and 20 buffers) it returns a *ShortfallError,
+// which also unwraps to ErrDeviceStalled, when the device delivered more than 10%
+// plus one buffer fewer frames than the rate implies (a period geometry the driver
+// accepts can make its hardware pointer run slower than real time without any
+// overrun). The window starts at the first successful Read and restarts after every
+// recovery. Read returns ErrClosed when the stream is closed and
 // ErrDeviceGone when the device disappears (e.g. a USB capture device
 // unplugged mid-stream, including while Read is parked in the driver); any
 // other unrecoverable error is returned unchanged. Any returned error leaves
@@ -275,6 +322,9 @@ func (s *Stream) Read(buf []byte) (int, error) {
 	for {
 		n, err := s.pcm.ReadI(buf, frames)
 		if err == nil {
+			if serr := s.checkShortfall(n); serr != nil {
+				return 0, serr
+			}
 			return n, nil
 		}
 		// Only errnos Recover can act on count against the budget; anything
@@ -295,8 +345,57 @@ func (s *Stream) Read(buf []byte) (int, error) {
 			// an unplug with ENODEV or EBADFD, which terminalError classifies.
 			return 0, s.terminalError(rerr)
 		}
+		// A restart or resume is a discontinuity the window must not span: frames
+		// lost to an overrun, or time the caller spent away, are not the device
+		// running slow.
+		s.winOn = false
 		s.xruns.Add(1)
 	}
+}
+
+// checkShortfall accounts n frames returned by a successful ReadI and, once a
+// window has elapsed, returns a *ShortfallError when the stream fell short of its
+// rate by more than the buffer plus the tolerance. The window starts at the first
+// successful read, not at Open or Start: a stream read without Start, or one that
+// sat idle before its first Read, would otherwise look like a long stretch with
+// nothing delivered. It restarts after every evaluation and after every Recover.
+// Frames that arrive while the caller is away from Read stay in the ring and the
+// next Read returns them, so a slow consumer does not trip it; one that is away
+// longer than the buffer gets an overrun, and the Recover restarts the window.
+// Everything is int64 integer arithmetic and one monotonic clock read, with no
+// allocation on the passing path.
+func (s *Stream) checkShortfall(n int) error {
+	now := monoNow()
+	if !s.winOn {
+		s.winOn, s.winStart, s.winFrames = true, now, 0
+		return nil
+	}
+	s.winFrames += int64(n)
+	elapsed := now - s.winStart
+	if elapsed < s.window {
+		return nil
+	}
+	rate := int64(s.cfg.Rate)
+	// Whole seconds and the remainder are scaled apart: elapsed is the gap since
+	// the last evaluation, and elapsed * rate overflows int64 once that gap passes
+	// a few hours at 384 kHz.
+	secs, rem := elapsed/int64(time.Second), elapsed%int64(time.Second)
+	expected := secs*rate + rem*rate/int64(time.Second)
+	delivered := s.winFrames
+	s.winStart, s.winFrames = now, 0
+	if delivered+s.bufferFrames >= expected-expected*shortfallTolPercent/100 {
+		return nil
+	}
+	// Same classification as a recovery that keeps failing: one probe separates a
+	// vanished device from a slow one, and a Close racing it wins.
+	gone := deviceDisconnected(s.pcm)
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	if gone {
+		return ErrDeviceGone
+	}
+	return &ShortfallError{Rate: s.cfg.Rate, Window: time.Duration(elapsed), Expected: expected, Delivered: delivered}
 }
 
 // terminalError maps an error that ends Start or Read onto the public errors.

@@ -8,7 +8,7 @@ Flag as defects:
 - Any cgo import or new runtime dependency beyond `golang.org/x/sys`.
 - A path where `Open`, `Start` or `Read` can block forever, or a retry or recovery loop with no bound and no wake-up on `Close`.
 - An ioctl or COM call that can run after `Close` released the handle, or a `Close` that does not unblock a parked `Read`. `Close` must always win: a concurrent close is reported as `ErrClosed`, never as a device error.
-- A raw errno, HRESULT or ad hoc string error where a sentinel or typed error applies (`ErrClosed`, `ErrDeviceGone`, `ErrDeviceInUse`, `ErrDeviceStalled`, `ErrExclusiveNotAllowed`, `ErrCapabilitiesUnsupported`, `*BadRateError`, `*BadFormatError`, `*ConfigError`, `*BadDeviceError`, `*DeviceNotFoundError`, `*AmbiguousDeviceError`, `*StallError`), or an error mapped to the wrong one (an unplug reported as a stall, a close reported as a device loss).
+- A raw errno, HRESULT or ad hoc string error where a sentinel or typed error applies (`ErrClosed`, `ErrDeviceGone`, `ErrDeviceInUse`, `ErrDeviceStalled`, `ErrExclusiveNotAllowed`, `ErrCapabilitiesUnsupported`, `*BadRateError`, `*BadFormatError`, `*ConfigError`, `*BadDeviceError`, `*DeviceNotFoundError`, `*AmbiguousDeviceError`, `*StallError`, `*ShortfallError`), or an error mapped to the wrong one (an unplug reported as a stall, a close reported as a device loss).
 - A second copy of an errno or HRESULT classification set instead of extending `alsa.IsDeviceGone`, `alsa.IsRecoverable` or `hresultError.Unwrap`.
 - An allocation on the steady-state `Read` path.
 - A change to an ioctl struct or ioctl number without updating the layout tests for both 64-bit and 32-bit builds.

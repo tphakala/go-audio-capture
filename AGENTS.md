@@ -69,6 +69,7 @@ This is the robustness contract. A change to any row is a behaviour change and n
 | System suspend/resume | resumed or re-prepared inside `Read`, counted | n/a | nothing |
 | Read stall (driver stops delivering, kernel read timeout `EIO`) | one restart inside `Read`, counted; a second stall returns `*StallError` (`ErrDeviceStalled`); `ErrDeviceGone` instead when a `PVERSION` probe at that point shows the device gone | not detected yet | close and reopen; on `ErrDeviceGone`, close and wait for the device to reappear |
 | Recovery keeps failing with no frames (9th recoverable failure in one gap) | `*StallError` (`ErrDeviceStalled`); `ErrDeviceGone` instead when a `PVERSION` probe at that point shows the device gone | n/a | close and reopen; on `ErrDeviceGone`, close and wait for the device to reappear |
+| Device delivers fewer frames than its rate with no overrun (small period geometry, driver pointer runs slow) | window of max(2 s, 20 buffers) with a 10% tolerance plus one buffer: `*ShortfallError` (`ErrDeviceStalled`); `ErrDeviceGone` instead when a `PVERSION` probe at that point shows the device gone | not detected yet | close and reopen, with a larger `PeriodFrames`/`Periods` if it repeats |
 | Device unplugged mid-stream | `ErrDeviceGone`, including while `Read` is parked and when the device vanishes during a recovery burst | `ErrDeviceGone` once `GetBuffer` sees the invalidation; a parked `Read` is not woken yet | close; wait for the device to reappear |
 | `Close` from another goroutine | `ErrClosed` | `ErrClosed` | stop reading |
 
@@ -121,13 +122,14 @@ These explain code that otherwise looks odd. Check against `sound/core/pcm_nativ
 - snd-usb-audio sizes capture URBs to under a period, down to one 125 us microframe at high speed with 12 queued; a host that misses microframes produces zero-length packets that advance nothing, so the hardware pointer runs slow with no xrun. This is why `applyGeometryFloor` raises the requested period to at least 1 ms.
 - The ALSA core sees only the ring position and corrects at most one wrap per update; a driver that moves a whole buffer between updates (snd-aloop steps in jiffies) loses frames silently, and the jiffies check that would catch it runs only with xrun_debug. This is why `applyGeometryFloor` raises the requested buffer to at least 20 ms, by adding periods.
 - A non-integer interval can come back from a refine with `openmin`/`openmax` set, where `Min`/`Max` are excluded values; `refineNear` steps over them.
+- A driver's hardware pointer can advance slower than real time with no errno: `ReadI` keeps succeeding on a pointer that is already short and no xrun is raised (issue #27: snd-usb-audio capture URBs of one microframe for sub-millisecond periods; snd-aloop moving whole jiffies against a buffer of a few milliseconds). `Read` therefore counts delivered frames against a monotonic clock (`checkShortfall`, clock seam `monoNow`). The window starts at the first successful read (a stream read without `Start` must not flag) and restarts after every `Recover` and every evaluation. It is max(2 s, 20 buffers) long, so the buffer's worth of frames that can sit unread stays at or under half the 10% tolerance; arithmetic is int64 because a 32-bit `int` cannot hold elapsed ns times rate.
 
 ## Testing approach
 
 Tests run without audio hardware. Each layer has an injection seam:
 
 - `internal/alsa`: `PCM` holds an `ioctlFunc`; tests construct it with `newPCM(fd, fake)`. `fakeKernel` in `lifecycle_test.go` models the PCM state machine so a test cannot claim a recovery the kernel would refuse; `fakeRateDevice` and `fakeCommitDevice` (`rates_test.go`) cover negotiation; `fakeStepDevice` (`geometry_test.go`) models narrowing refines, `rmask`, a period-bytes step rule, a buffer cap and a channel range, and `fakeStatefulRateDevice` models OPEN/SETUP with `HW_FREE`. Fakes must narrow intervals the way the kernel does (`narrowInterval`); a fake that overwrites a pinned interval would let a wrong pin pass. `sysOpen`, `sysSetNonblock` and `resumeSleep` are package seams for the open flags and the RESUME retry wait.
-- Root package, Linux: package-level function vars `openPCM` (stream) and `openRatePCM` (capabilities) are swapped for fakes (`fakePCM` in `stream_linux_test.go`; lifecycle and recovery-budget cases in `stream_lifecycle_linux_test.go`).
+- Root package, Linux: package-level function vars `openPCM` (stream), `openRatePCM` (capabilities) and `monoNow` (the shortfall clock; `stream_shortfall_linux_test.go` drives it with a fake clock, so no test sleeps) are swapped for fakes (`fakePCM` in `stream_linux_test.go`; lifecycle and recovery-budget cases in `stream_lifecycle_linux_test.go`).
 - Device identity: `devicesFrom(procDir, sysDir)` takes roots; `deviceid_fixture_linux_test.go` builds throwaway `/proc/asound` and `/sys` trees with symlinks under `t.TempDir()` (sysfs symlinks cannot be committed).
 - Windows: `openEndpoint` var in `stream_windows.go`; WASAPI fill and format logic are tested directly.
 - Layout tests (`layout_lp64_test.go`, `layout_ilp32_test.go`) assert C-verified struct sizes, offsets and ioctl numbers. ILP32 assertions only execute under `GOARCH=386`.
@@ -189,7 +191,7 @@ Flag these, they are real defects here:
 Intentional, do not flag:
 
 - `unsafe.Pointer` conversions when passing structs to ioctls and COM vtables; layouts are pinned by the layout tests.
-- Package-level function variables (`openPCM`, `openRatePCM`, `openEndpoint`, `sysOpen`, `sysSetNonblock`, `resumeSleep`) used as test seams.
+- Package-level function variables (`openPCM`, `openRatePCM`, `openEndpoint`, `monoNow`, `sysOpen`, `sysSetNonblock`, `resumeSleep`) used as test seams.
 - Ignored errors from best-effort cleanup (`_ = p.Close()` on an error path, `Close`'s `DROP`).
 - Mutexes that are never held across a blocking syscall; `Close` coordinates through the in-flight count instead.
 - Magic numbers in `internal/alsa` and `internal/wasapi` that mirror kernel or Windows headers.

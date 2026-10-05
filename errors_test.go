@@ -3,6 +3,7 @@ package capture
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestBadFormatErrorString(t *testing.T) {
@@ -31,5 +32,19 @@ func TestGeometryErrorStringAndUnwrap(t *testing.T) {
 	}
 	if !errors.Is(err, cause) {
 		t.Error("GeometryError does not unwrap to its cause")
+	}
+}
+
+func TestShortfallErrorMessageAndUnwrap(t *testing.T) {
+	var err error = &ShortfallError{Rate: 48000, Window: 2 * time.Second, Expected: 96000, Delivered: 62400}
+	want := "capture: device delivered 62400 of 96000 expected frames at 48000 Hz over 2s"
+	if got := err.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	if !errors.Is(err, ErrDeviceStalled) {
+		t.Error("errors.Is(err, ErrDeviceStalled) = false")
+	}
+	if errors.Is(err, ErrDeviceGone) {
+		t.Error("errors.Is(err, ErrDeviceGone) = true")
 	}
 }
