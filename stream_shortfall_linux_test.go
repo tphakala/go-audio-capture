@@ -289,3 +289,59 @@ func TestShortfallClockFarFromZeroKeepsInt64(t *testing.T) {
 		t.Fatalf("768 kHz stream at real time flagged: %v", err)
 	}
 }
+
+func TestShortfallWindowRestartsAfterEachEvaluation(t *testing.T) {
+	// 20 s of healthy capture (10 windows), then a device that drops to 0.65 x
+	// real time. A window that kept accumulating across evaluations would dilute
+	// the slow phase with the healthy 20 s and need about 8 s to flag; a window
+	// that restarts flags at its first evaluation after the change.
+	c := withFakeClock(t)
+	fp := &fakePCM{}
+	healthy := paced(c, 1, 1)
+	var slow func() (int, error)
+	fp.readFn = func() (int, error) {
+		if slow != nil {
+			return slow()
+		}
+		return healthy()
+	}
+	s, buf := newShortfallStream(t, fp, 0, 0)
+	if err := readFor(c, s, buf, 20*time.Second); err != nil {
+		t.Fatalf("healthy phase flagged: %v", err)
+	}
+	slow = paced(c, 65, 100)
+	changed := c.now
+	err := readFor(c, s, buf, 60*time.Second)
+	if _, ok := errors.AsType[*ShortfallError](err); !ok {
+		t.Fatalf("err = %v, want *ShortfallError after the device slowed down", err)
+	}
+	if took := time.Duration(c.now - changed); took > 5*time.Second {
+		t.Errorf("flagged %v after the slowdown, want within about two windows", took)
+	}
+}
+
+func TestShortfallThresholdIsTolerancePlusBuffer(t *testing.T) {
+	// Default geometry: an 80 ms buffer is 4% of the 2 s window, the tolerance is
+	// 10%, so a device flags only when more than about 14% short.
+	for _, tc := range []struct {
+		name     string
+		num, den int64
+		wantFlag bool
+	}{
+		{"7% short is inside the tolerance", 93, 100, false},
+		{"12% short is inside tolerance plus buffer", 88, 100, false},
+		{"16% short is outside it", 84, 100, true},
+		{"20% short is outside it", 80, 100, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := withFakeClock(t)
+			fp := &fakePCM{}
+			fp.readFn = paced(c, tc.num, tc.den)
+			s, buf := newShortfallStream(t, fp, 0, 0)
+			err := readFor(c, s, buf, 60*time.Second)
+			if _, flagged := errors.AsType[*ShortfallError](err); flagged != tc.wantFlag {
+				t.Errorf("flagged = %v (err %v), want %v", flagged, err, tc.wantFlag)
+			}
+		})
+	}
+}
