@@ -200,7 +200,7 @@ func (e *BadFormatError) Error() string {
 // near the requested ones, at a rate, channel count and format that the device
 // advertised. Rate, PeriodFrames and Periods are the values the commit was
 // attempted with; when no nearby value could be pinned they are the requested
-// ones, except PeriodFrames, which keeps a period size already chosen when only
+// ones after defaults and, on Linux, the 1 ms / 20 ms floor, except PeriodFrames, which keeps a period size already chosen when only
 // the period count failed. Err is the driver's error (on Linux HW_PARAMS for a refused commit, HW_REFINE
 // when no nearby value could be pinned).
 //

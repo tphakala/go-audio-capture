@@ -28,8 +28,8 @@ func main() {
 	dur := flag.Duration("t", 10*time.Second, "record duration")
 	out := flag.String("o", "out.wav", "output WAV file")
 	list := flag.Bool("list", false, "list capture devices and exit")
-	periodFrames := flag.Int("p", 0, "period size in frames (0 = default, rate/50 on Linux); the device may adjust it")
-	periods := flag.Int("n", 0, "periods per buffer (0 = default, 4 on Linux); the device may adjust it")
+	periodFrames := flag.Int("p", 0, "period size in frames (0 = default, rate/50 on Linux); the device may adjust it; on Linux raised to at least a 1 ms period and a 20 ms buffer")
+	periods := flag.Int("n", 0, "periods per buffer (0 = default, 4 on Linux); the device may adjust it; on Linux raised to at least a 1 ms period and a 20 ms buffer")
 	rates := flag.Bool("rates", false, "print SupportedRates and SupportedRatesVerified for -d/-c/-f with elapsed time, then exit")
 	flag.Parse()
 
@@ -171,7 +171,7 @@ func record(device string, rate, channels int, format string, periodFrames, peri
 	}
 	fmt.Fprintf(os.Stderr, "wrote %d bytes to %s, xruns: %d\n", dataBytes, out, s.Xruns())
 	// Real-time capture must produce audio duration ~= wall time. A ratio far
-	// from 1.0 means Stream.Read mis-accounted frames (over- or under-delivery).
+	// from 1.0 means the device or driver delivered fewer or more frames than its rate.
 	if frameBytes > 0 && wall > 0 {
 		totalFrames := dataBytes / int64(frameBytes)
 		audioSec := float64(totalFrames) / float64(n.Rate)

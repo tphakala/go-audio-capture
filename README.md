@@ -207,6 +207,7 @@ What a caller sees for each failure, and what to do about it. Anything `Read` re
 | Rate not supported | `*BadRateError` (carries the supported range) | pick a supported rate; `SupportedRates` lists them on Linux |
 | Channel count or sample format not supported | `*BadFormatError` (Linux: carries the accepted channel range) | pick another layout |
 | Period geometry refused (Linux) | `*GeometryError` (wraps the driver's errno) | pass other `PeriodFrames`/`Periods`, or another rate or format; `SupportedRatesVerified` lists the rates that commit at the default geometry |
+| Period below 1 ms or buffer below 20 ms requested (Linux) | none: raised before negotiation, `Negotiated` reports the result | read `Negotiated` |
 | Device held by another application | `ErrDeviceInUse`, returned at once (on Linux, a busy card that is no longer the unit a stable id resolved to is `ErrDeviceGone`) | retry later with a backoff |
 | Exclusive access disabled for the endpoint (Windows) | `ErrExclusiveNotAllowed` | the user changes the endpoint setting |
 | Configured device not attached, or the `DeviceInfo` passed to `OpenDevice` no longer names the card it was resolved to (Linux) | `ErrDeviceGone` (`*DeviceNotFoundError`, which unwraps to it, for a stable id on Linux and from `Resolve` on both platforms) | wait for it to reappear (`Resolve` again), then open |
