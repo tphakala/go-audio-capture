@@ -355,6 +355,20 @@ type ControlValueError struct {
 	Reason   string
 }
 
+// Error names the control, the values and the range only when they carry data:
+// a percent rejected before any element is chosen has none of them.
 func (e *ControlValueError) Error() string {
-	return fmt.Sprintf("capture: control %s: invalid value %v: %s (range %d..%d, step %d)", e.ID, e.Values, e.Reason, e.Min, e.Max, e.Step)
+	msg := "capture:"
+	if e.ID.Name != "" {
+		msg += " control " + e.ID.String() + ":"
+	}
+	msg += " invalid value"
+	if len(e.Values) > 0 {
+		msg += fmt.Sprintf(" %v", e.Values)
+	}
+	msg += ": " + e.Reason
+	if e.Min != 0 || e.Max != 0 || e.Step != 0 {
+		msg += fmt.Sprintf(" (range %d..%d, step %d)", e.Min, e.Max, e.Step)
+	}
+	return msg
 }

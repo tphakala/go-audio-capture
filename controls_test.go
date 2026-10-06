@@ -130,3 +130,25 @@ func TestControlErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestControlValueErrorMessage(t *testing.T) {
+	id := ControlID{Interface: ControlMixer, Name: micVol}
+	for _, tt := range []struct {
+		name string
+		err  *ControlValueError
+		want string
+	}{
+		{"no element, values or range", &ControlValueError{Reason: "percent 101 is outside 0..100"},
+			"capture: invalid value: percent 101 is outside 0..100"},
+		{"element only", &ControlValueError{ID: id, Reason: "reading BYTES elements is not supported"},
+			"capture: control 'Mic Capture Volume',index=0,iface=MIXER: invalid value: reading BYTES elements is not supported"},
+		{"element, values and range", &ControlValueError{ID: id, Values: []int64{9}, Max: 5, Reason: "9 is outside the range"},
+			"capture: control 'Mic Capture Volume',index=0,iface=MIXER: invalid value [9]: 9 is outside the range (range 0..5, step 0)"},
+		{"step only", &ControlValueError{ID: id, Values: []int64{7}, Step: 5, Reason: "off the step rule"},
+			"capture: control 'Mic Capture Volume',index=0,iface=MIXER: invalid value [7]: off the step rule (range 0..0, step 5)"},
+	} {
+		if got := tt.err.Error(); got != tt.want {
+			t.Errorf("%s:\n got %q\nwant %q", tt.name, got, tt.want)
+		}
+	}
+}
