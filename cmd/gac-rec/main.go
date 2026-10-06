@@ -33,8 +33,14 @@ func main() {
 	rates := flag.Bool("rates", false, "print SupportedRates and SupportedRatesVerified for -d/-c/-f with elapsed time, then exit")
 	controls := flag.Bool("controls", false, "list the hardware controls (mixer elements) of -d with their values and dB ranges, then exit (Linux)")
 	setCtl := flag.String("set", "", "set a control of -d, as 'NAME[#INDEX]=V[,V...]' (raw values, one per channel), then print it and exit (Linux)")
-	capVol := flag.Float64("capture-volume", -1, "set the capture volume of -d to this percent (0-100) of its raw range, then exit (Linux)")
+	capVol := flag.Float64("capture-volume", 0, "set the capture volume of -d to this percent (0-100) of its raw range, then exit (Linux)")
 	flag.Parse()
+	capVolSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "capture-volume" {
+			capVolSet = true
+		}
+	})
 
 	if *list {
 		if err := listDevices(); err != nil {
@@ -53,7 +59,7 @@ func main() {
 			fatal(err)
 		}
 		return
-	case *capVol >= 0:
+	case capVolSet:
 		if err := setCaptureVolume(*device, *capVol); err != nil {
 			fatal(err)
 		}
