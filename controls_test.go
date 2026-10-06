@@ -144,6 +144,8 @@ func TestControlValueErrorMessage(t *testing.T) {
 			"capture: control 'Mic Capture Volume',index=0,iface=MIXER: invalid value: reading BYTES elements is not supported"},
 		{"element, values and range", &ControlValueError{ID: id, Values: []int64{9}, Max: 5, Reason: "9 is outside the range"},
 			"capture: control 'Mic Capture Volume',index=0,iface=MIXER: invalid value [9]: 9 is outside the range (range 0..5, step 0)"},
+		{"negative min only", &ControlValueError{ID: id, Values: []int64{5}, Min: -10, Reason: "5 is outside the range"},
+			"capture: control 'Mic Capture Volume',index=0,iface=MIXER: invalid value [5]: 5 is outside the range (range -10..0, step 0)"},
 		{"step only", &ControlValueError{ID: id, Values: []int64{7}, Step: 5, Reason: "off the step rule"},
 			"capture: control 'Mic Capture Volume',index=0,iface=MIXER: invalid value [7]: off the step rule (range 0..0, step 5)"},
 	} {
