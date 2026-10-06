@@ -83,7 +83,7 @@ func OpenControls(d DeviceInfo) (*Controls, error) {
 		// identity check, so this is the only sign it went away. Where
 		// /proc/asound is hidden or unreadable (some containers) the card reads as
 		// absent, so a missing control node there is ErrDeviceGone too.
-		if errors.Is(err, unix.ENODEV) || (errors.Is(err, unix.ENOENT) && !cardPresent(r.card)) {
+		if alsa.IsCtlGone(err) || (errors.Is(err, unix.ENOENT) && !cardPresent(r.card)) {
 			return nil, ErrDeviceGone
 		}
 		return nil, err
