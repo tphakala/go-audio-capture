@@ -143,3 +143,27 @@ func TestControlValueErrorMessage(t *testing.T) {
 		}
 	}
 }
+
+func TestNearestValidStaysInsideTheRangeAtTheEnds(t *testing.T) {
+	// Neither MinInt64 nor MinInt64+1 satisfies step 5 under the unsigned rule
+	// (2^63 mod 5 is 3), and wrapping target-d past MinInt64 reaches a value that
+	// does, which must not be returned.
+	if v, ok := nearestValid(math.MinInt64, math.MinInt64, math.MinInt64+1, 5); ok {
+		t.Errorf("nearestValid returned %d, want no value inside the range", v)
+	}
+	if v, ok := nearestValid(math.MaxInt64, math.MaxInt64-1, math.MaxInt64, 1<<62); ok {
+		t.Errorf("nearestValid returned %d at the top end, want no value inside the range", v)
+	}
+	for _, c := range []struct{ target, lo, hi int64 }{
+		{5, 10, 20},  // target below the range
+		{25, 10, 20}, // target above the range
+		{5, 20, 10},  // inverted range
+	} {
+		if v, ok := nearestValid(c.target, c.lo, c.hi, 1); ok {
+			t.Errorf("nearestValid(%d, %d, %d) = %d, want none", c.target, c.lo, c.hi, v)
+		}
+	}
+	if v, ok := nearestValid(7, 0, 20, 5); !ok || v != 5 {
+		t.Errorf("nearestValid(7, 0, 20, 5) = %d, %v, want 5", v, ok)
+	}
+}

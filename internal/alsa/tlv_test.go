@@ -80,6 +80,17 @@ func TestParseDB(t *testing.T) {
 			rawMin: 0, rawMax: 3, wantOK: true,
 			want: []DBSegment{{RawMin: 0, RawMax: 3, MinCdB: -600, MaxCdB: -300}},
 		},
+		{
+			name:   "container with a scale then a truncated child is malformed",
+			tlv:    item(tlvContainer, cat(scale(-600, 100), []uint32{0x101, 400, 3})...),
+			rawMin: 0, rawMax: 3,
+		},
+		{
+			name:   "container with a scale then a second scale keeps the first",
+			tlv:    item(tlvContainer, cat(scale(-600, 100), scale(-100, 10))...),
+			rawMin: 0, rawMax: 3, wantOK: true,
+			want: []DBSegment{{RawMin: 0, RawMax: 3, MinCdB: -600, MaxCdB: -300}},
+		},
 		{name: "db linear is not understood", tlv: item(2, w(-600), 0), rawMin: 0, rawMax: 3},
 		{
 			name:   "length not a multiple of 4 rounds up",

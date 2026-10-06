@@ -429,10 +429,10 @@ func (c *Controls) SetCaptureVolumePercent(percent float64) (raw int64, err erro
 	if err != nil {
 		return 0, err
 	}
-	target := info.Min + int64(math.Round(percent/100*float64(info.Max-info.Min)))
+	target := interpolate(info.Min, info.Max, percent)
 	v, ok := nearestValid(target, info.Min, info.Max, info.Step)
 	if !ok {
-		return 0, &ControlValueError{ID: info.ID, Min: info.Min, Max: info.Max, Step: info.Step, Reason: "no value in the range satisfies the step rule"}
+		return 0, &ControlValueError{ID: info.ID, Min: info.Min, Max: info.Max, Step: info.Step, Reason: "no value satisfying the step rule was found near the target within the search limit"}
 	}
 	vals := make([]int64, info.Count)
 	for i := range vals {
@@ -442,4 +442,18 @@ func (c *Controls) SetCaptureVolumePercent(percent float64) (raw int64, err erro
 		return 0, err
 	}
 	return v, nil
+}
+
+// interpolate maps percent (0 to 100) onto [lo, hi] in float64, so a range as
+// wide as the whole int64 span cannot overflow, and clamps the result to it.
+func interpolate(lo, hi int64, percent float64) int64 {
+	f := float64(lo) + math.Round(percent/100*(float64(hi)-float64(lo)))
+	switch {
+	case f <= float64(lo):
+		return lo
+	case f >= float64(hi):
+		return hi
+	default:
+		return int64(f)
+	}
 }

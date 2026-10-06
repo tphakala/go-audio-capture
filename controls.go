@@ -215,12 +215,20 @@ func stepOK(v, step int64) bool {
 }
 
 // nearestValid returns the value closest to target inside [lo, hi] that satisfies
-// the step rule, preferring the lower one on a tie. The search is bounded; ok is
-// false when none was found.
+// the step rule, preferring the lower one on a tie. The search is bounded to
+// 2^20 values either side of target; ok is false when none was found within it,
+// which is not proof that none exists for a very wide range with a very large
+// step.
 func nearestValid(target, lo, hi, step int64) (v int64, ok bool) {
 	const maxProbe = 1 << 20
+	if lo > hi || target < lo || target > hi {
+		return 0, false
+	}
 	for d := range int64(maxProbe) {
-		below, above := target-d >= lo, target+d <= hi
+		// With lo <= target <= hi the distances are exact in uint64, so the
+		// checks cannot wrap near the ends of the int64 range.
+		below := uint64(target)-uint64(lo) >= uint64(d)
+		above := uint64(hi)-uint64(target) >= uint64(d)
 		if !below && !above {
 			return 0, false
 		}

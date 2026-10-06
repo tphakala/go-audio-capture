@@ -134,17 +134,21 @@ func parseDBRange(body []uint32) ([]DBSegment, bool) {
 
 // parseDBContainer returns the dB segments of the first child that carries dB
 // information. Children of other kinds (a channel map next to a volume's dB) are
-// skipped; a child whose length is inconsistent with the container is an error.
+// skipped; a child whose length is inconsistent with the container is an error,
+// wherever it sits among the children.
 func parseDBContainer(body []uint32, rawMin, rawMax int64, depth int) ([]DBSegment, bool) {
+	var found []DBSegment
 	for len(body) > 0 {
 		_, _, total, ok := tlvBody(body)
 		if !ok {
 			return nil, false
 		}
-		if segs, ok := parseDBItem(body[:total], rawMin, rawMax, depth+1); ok {
-			return segs, true
+		// Keep the first dB child but still walk the rest, so a truncated or
+		// oversized child after it makes the whole TLV malformed.
+		if segs, ok := parseDBItem(body[:total], rawMin, rawMax, depth+1); ok && found == nil {
+			found = segs
 		}
 		body = body[total:]
 	}
-	return nil, false
+	return found, found != nil
 }

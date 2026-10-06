@@ -718,6 +718,9 @@ func TestSetCaptureVolumePercent(t *testing.T) {
 		{"negative range with step 5 uses the unsigned rule", -20, 0, 5, 1, 50, -11},
 		{"negative min step 1", -60, 0, 1, 1, 50, -30},
 		{"all channels get the same value", 0, 100, 0, 4, 25, 25},
+		{"a range as wide as int64 at 0 gives min", math.MinInt64, math.MaxInt64, 0, 1, 0, math.MinInt64},
+		{"a range as wide as int64 at 50 gives about zero", math.MinInt64, math.MaxInt64, 0, 1, 50, 0},
+		{"a range as wide as int64 at 100 gives max", math.MinInt64, math.MaxInt64, 0, 1, 100, math.MaxInt64},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
