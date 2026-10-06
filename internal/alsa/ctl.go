@@ -3,6 +3,7 @@
 package alsa
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -26,12 +27,8 @@ const (
 
 	CtlAccessRead     = 1 << 0
 	CtlAccessWrite    = 1 << 1
-	CtlAccessVolatile = 1 << 2
 	CtlAccessTLVRead  = 1 << 4
 	CtlAccessInactive = 1 << 8
-	CtlAccessLock     = 1 << 9
-	CtlAccessOwner    = 1 << 10
-	CtlAccessUser     = 1 << 29
 
 	// CtlNameLen is the size of snd_ctl_elem_id.name. The kernel compares at most
 	// this many bytes (control.c snd_ctl_find_id strncmp), so a longer name sent
@@ -120,7 +117,7 @@ func (id *CtlElemID) NameString() string {
 }
 
 func cString(b []byte) string {
-	if i := strings.IndexByte(string(b), 0); i >= 0 {
+	if i := bytes.IndexByte(b, 0); i >= 0 {
 		b = b[:i]
 	}
 	return string(b)
