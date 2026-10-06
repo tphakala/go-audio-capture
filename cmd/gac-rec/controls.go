@@ -110,10 +110,10 @@ func setControl(device, spec string) error {
 	if err != nil {
 		return err
 	}
-	var matches []capture.ControlID
+	var matches []capture.ControlInfo
 	for i := range list {
 		if list[i].ID.Name == name && list[i].ID.Index == index {
-			matches = append(matches, list[i].ID)
+			matches = append(matches, list[i])
 		}
 	}
 	switch len(matches) {
@@ -121,16 +121,25 @@ func setControl(device, spec string) error {
 		return fmt.Errorf("no control named %q with index %d", name, index)
 	case 1:
 	default:
-		return fmt.Errorf("%q#%d matches %d controls: %v", name, index, len(matches), matches)
+		ids := make([]capture.ControlID, len(matches))
+		for i := range matches {
+			ids[i] = matches[i].ID
+		}
+		return fmt.Errorf("%q#%d matches %d controls: %v", name, index, len(matches), ids)
 	}
-	if err := c.Set(matches[0], values); err != nil {
+	target := &matches[0]
+	if err := c.Set(target.ID, values); err != nil {
 		return err
 	}
-	got, err := c.Get(matches[0])
+	if target.Access&capture.AccessRead == 0 {
+		fmt.Printf("%s written (write-only, not read back)\n", target.ID)
+		return nil
+	}
+	got, err := c.Get(target.ID)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s = %v\n", matches[0], got)
+	fmt.Printf("%s = %v\n", target.ID, got)
 	return nil
 }
 

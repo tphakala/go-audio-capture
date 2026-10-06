@@ -35,10 +35,15 @@ func main() {
 	setCtl := flag.String("set", "", "set a control of -d, as 'NAME[#INDEX]=V[,V...]' (raw values, one per channel), then print it and exit (Linux)")
 	capVol := flag.Float64("capture-volume", 0, "set the capture volume of -d to this percent (0-100) of its raw range, then exit (Linux)")
 	flag.Parse()
-	capVolSet := false
+	// Visited flags, so an explicit "-capture-volume 0" or an empty "-set" is a
+	// control command instead of falling through to recording.
+	capVolSet, setCtlSet := false, false
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "capture-volume" {
+		switch f.Name {
+		case "capture-volume":
 			capVolSet = true
+		case "set":
+			setCtlSet = true
 		}
 	})
 
@@ -54,7 +59,7 @@ func main() {
 			fatal(err)
 		}
 		return
-	case *setCtl != "":
+	case setCtlSet:
 		if err := setControl(*device, *setCtl); err != nil {
 			fatal(err)
 		}
