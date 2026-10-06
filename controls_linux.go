@@ -80,7 +80,9 @@ func OpenControls(d DeviceInfo) (*Controls, error) {
 		// /proc/asound entry is gone too: with the card present it is a control
 		// node that is not there (a container that maps only the PCM node), which
 		// is the open error, not a lost device. A numeric id has no post-open
-		// identity check, so this is the only sign it went away.
+		// identity check, so this is the only sign it went away. Where
+		// /proc/asound is hidden or unreadable (some containers) the card reads as
+		// absent, so a missing control node there is ErrDeviceGone too.
 		if errors.Is(err, unix.ENODEV) || (errors.Is(err, unix.ENOENT) && !cardPresent(r.card)) {
 			return nil, ErrDeviceGone
 		}
