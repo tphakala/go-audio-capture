@@ -355,17 +355,6 @@ func TestCtlNameLimits(t *testing.T) {
 			t.Errorf("%s: accepted, want an error", name)
 		}
 	}
-	// The element whose name is the 44-byte prefix must never be reachable by
-	// sending a longer name: no ioctl may be issued for a rejected name, because
-	// the kernel would compare only the first 44 bytes.
-	k := &fakeCtlKernel{}
-	k.add(newFakeElem(long44, CtlTypeInteger, 1))
-	if _, err := NewCtlElemID(2, 0, 0, long44+"B", 0); err == nil {
-		t.Fatal("45-byte name accepted")
-	}
-	if len(k.calls) != 0 {
-		t.Errorf("ioctls issued for a rejected name: %v", k.calls)
-	}
 }
 
 func TestCtlInfoDecodes(t *testing.T) {

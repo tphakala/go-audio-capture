@@ -853,3 +853,124 @@ func TestOpenControlsNumericIdOnAbsentCardIsDeviceGone(t *testing.T) {
 		t.Fatalf("OpenControls = %v, want ErrDeviceGone", err)
 	}
 }
+
+func TestOpenControlsRejectsBadDeviceInfoBeforeOpening(t *testing.T) {
+	useFixture(t, hostLayout())
+	withOpenCtl(t, func(int) (ctlHandle, error) {
+		t.Error("a control device was opened for an unusable DeviceInfo")
+		return nil, errShouldNotOpen
+	})
+	for name, tt := range map[string]struct {
+		d    DeviceInfo
+		want func(error) bool
+	}{
+		"empty": {DeviceInfo{}, func(err error) bool { _, ok := errors.AsType[*ConfigError](err); return ok }},
+		"card and id disagree": {DeviceInfo{ID: hwAddrCard1, Card: 2}, func(err error) bool {
+			_, ok := errors.AsType[*BadDeviceError](err)
+			return ok
+		}},
+		"port id on a numeric id": {DeviceInfo{ID: hwAddrCard1, Card: 1, PortID: "usb:1686:067f:p=0000:00:14.0-3:if=0,0"}, func(err error) bool {
+			_, ok := errors.AsType[*BadDeviceError](err)
+			return ok
+		}},
+	} {
+		if c, err := OpenControls(tt.d); c != nil || !tt.want(err) {
+			t.Errorf("%s: OpenControls = %v, %v, want a typed resolve error", name, c, err)
+		}
+	}
+}
+
+func TestControlsGet(t *testing.T) {
+	f := &fakeCtl{}
+	sw := f.add("Capture Switch", int32(ControlMixer), alsa.CtlTypeBoolean, 2)
+	sw.max, sw.vals = 1, []int64{1, 0}
+	en := f.add(enumName, int32(ControlMixer), alsa.CtlTypeEnumerated, 1)
+	en.items, en.vals = []string{"a", "b", "c"}, []int64{2}
+	f.add("Big", int32(ControlMixer), alsa.CtlTypeInteger64, 1)
+	wo := f.vol("Write Only Volume", 0, 10, 0, 1)
+	wo.access = alsa.CtlAccessWrite
+	c := newTestControls(f)
+
+	for name, tt := range map[string]struct {
+		id   string
+		want []int64
+	}{"boolean": {"Capture Switch", []int64{1, 0}}, "enumerated": {enumName, []int64{2}}} {
+		got, err := c.Get(mixerID(tt.id))
+		if err != nil || !slices.Equal(got, tt.want) {
+			t.Errorf("%s: Get = %v, %v, want %v", name, got, err, tt.want)
+		}
+	}
+	reads := f.count("read")
+	if _, err := c.Get(mixerID("Big")); !isValueErr(err) {
+		t.Errorf("Get on INTEGER64 = %v, want *ControlValueError", err)
+	}
+	_, err := c.Get(mixerID("Write Only Volume"))
+	if ae, ok := errors.AsType[*ControlAccessError](err); !ok || ae.Op != "read" {
+		t.Errorf("Get on a write-only element = %v, want *ControlAccessError for read", err)
+	}
+	if f.count("read") != reads {
+		t.Error("a read ioctl was issued for a rejected Get")
+	}
+}
+
+func TestControlsListToleratesMissingOrOversizedTLV(t *testing.T) {
+	f := &fakeCtl{}
+	none := f.vol("No Capture Volume", 0, 10, 0, 1) // claims a TLV, has none: ENXIO
+	none.access |= alsa.CtlAccessTLVRead
+	big := f.vol("Big Capture Volume", 0, 10, 0, 1)
+	big.access |= alsa.CtlAccessTLVRead
+	big.tlv = []uint32{1, 8, 0, 50}
+	f.failOp = func(op string) error {
+		if op == "tlv" && f.count("tlv")%2 == 0 { // second TLV read: ENOMEM
+			return wrapErrno(unix.ENOMEM)
+		}
+		return nil
+	}
+	got, err := newTestControls(f).List()
+	if err != nil || len(got) != 2 {
+		t.Fatalf("List = %v, %v, want both elements", got, err)
+	}
+	if got[0].HasDB || got[1].HasDB {
+		t.Error("an element without a readable TLV reports dB")
+	}
+}
+
+func TestControlsListErrorsOnBrokenTLVOrItems(t *testing.T) {
+	t.Run("TLV read fails with EIO", func(t *testing.T) {
+		f := &fakeCtl{}
+		v := f.vol("Mic Capture Volume", 0, 10, 0, 1)
+		v.access |= alsa.CtlAccessTLVRead
+		v.tlv = []uint32{1, 8, 0, 50}
+		f.failOp = func(op string) error {
+			if op == "tlv" {
+				return wrapErrno(unix.EIO)
+			}
+			return nil
+		}
+		if _, err := newTestControls(f).List(); !errors.Is(err, unix.EIO) {
+			t.Errorf("List = %v, want the wrapped EIO", err)
+		}
+	})
+	t.Run("too many enumerated items", func(t *testing.T) {
+		f := &fakeCtl{}
+		en := f.add(enumName, int32(ControlMixer), alsa.CtlTypeEnumerated, 1)
+		en.items = make([]string, alsa.CtlMaxItems+1)
+		if _, err := newTestControls(f).List(); err == nil {
+			t.Error("List accepted an element with more items than the cap")
+		}
+	})
+	t.Run("item name read fails", func(t *testing.T) {
+		f := &fakeCtl{}
+		en := f.add(enumName, int32(ControlMixer), alsa.CtlTypeEnumerated, 1)
+		en.items = []string{"a"}
+		f.failOp = func(op string) error {
+			if op == "item" {
+				return wrapErrno(unix.EIO)
+			}
+			return nil
+		}
+		if _, err := newTestControls(f).List(); !errors.Is(err, unix.EIO) {
+			t.Errorf("List = %v, want the wrapped EIO", err)
+		}
+	})
+}
