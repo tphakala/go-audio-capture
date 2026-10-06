@@ -985,6 +985,18 @@ func TestControlsListErrorsOnBrokenTLVOrItems(t *testing.T) {
 			t.Errorf("CaptureVolume failed on a card with an oversized enumerated element: %v", err)
 		}
 	})
+	t.Run("exactly the cap of enumerated items keeps its names", func(t *testing.T) {
+		f := &fakeCtl{}
+		en := f.add(enumName, int32(ControlMixer), alsa.CtlTypeEnumerated, 1)
+		en.items = make([]string, alsa.CtlMaxItems)
+		list, err := newTestControls(f).List()
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(list) != 1 || len(list[0].Items) != alsa.CtlMaxItems {
+			t.Fatalf("List returned %d elements with %d item names, want one element with %d", len(list), len(list[0].Items), alsa.CtlMaxItems)
+		}
+	})
 	t.Run("item name read fails", func(t *testing.T) {
 		f := &fakeCtl{}
 		en := f.add(enumName, int32(ControlMixer), alsa.CtlTypeEnumerated, 1)
