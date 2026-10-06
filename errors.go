@@ -295,7 +295,7 @@ type ControlNotFoundError struct {
 
 func (e *ControlNotFoundError) Error() string {
 	if e.Pattern {
-		return "capture: no capture volume control (want an active, writable INTEGER mixer element named \"Capture Volume\" or ending in \" Capture Volume\")"
+		return "capture: no capture volume control (want an active, readable and writable INTEGER mixer element named \"Capture Volume\" or ending in \" Capture Volume\")"
 	}
 	return fmt.Sprintf("capture: no such control %s", e.ID)
 }

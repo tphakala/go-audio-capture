@@ -391,8 +391,8 @@ func (c *Controls) captureVolume(deep bool) (ControlInfo, error) {
 }
 
 // CaptureVolume returns the card's capture volume element: the one active,
-// writable INTEGER mixer element named "Capture Volume" or ending in " Capture
-// Volume". Zero matches is *ControlNotFoundError (with Pattern set), several is
+// readable and writable INTEGER mixer element named "Capture Volume" or ending
+// in " Capture Volume". Zero matches is *ControlNotFoundError (with Pattern set), several is
 // *AmbiguousControlError. It never prefers one candidate over another; pass the
 // ControlID you want to Set instead. It scans the card on every call.
 func (c *Controls) CaptureVolume() (ControlInfo, error) {

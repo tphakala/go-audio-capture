@@ -10,7 +10,8 @@ import (
 // The struct sizes, field offsets, and ioctl request numbers asserted here are
 // the kernel's own. The expected values are word-size specific and live in
 // layout_lp64_test.go (amd64, arm64, riscv64, loong64) and layout_ilp32_test.go
-// (386, arm) as the want* constants, each C-verified against
+// (386, arm) as the want* constants, each C-verified (except the arm
+// snd_ctl_elem_value layout, see layout_arm_test.go) against
 // /usr/include/sound/asound.h with an offsetof/sizeof probe (see the header
 // comment in each file).
 //

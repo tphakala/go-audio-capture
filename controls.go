@@ -163,7 +163,9 @@ type ControlInfo struct {
 	// Items lists the names of an ENUMERATED element, in index order.
 	Items []string
 	// HasDB reports that the element carries a dB TLV the library understood.
-	// MinDB and MaxDB are then the dB at Min and Max.
+	// MinDB and MaxDB are then the dB at the first and last end of the TLV's
+	// ranges; a step the driver marks as mute still has a finite MinDB, and
+	// ValueDB reports it as negative infinity.
 	HasDB        bool
 	MinDB, MaxDB float64
 

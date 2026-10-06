@@ -7,5 +7,7 @@ package alsa
 // and the struct is 712 bytes. An arm64 kernel serving a 32-bit process uses
 // control_compat.c, where snd_ctl_elem_value32 keeps its s64 member outside
 // CONFIG_X86_64 and so has the same 8-aligned union (linux v6.17
-// control_compat.c:140-151). Derived from source, not yet run against a kernel.
+// control_compat.c:140-151). Derived from source; a GOARCH=arm binary read
+// every control of a USB card without ENOTTY on an aarch64 kernel (the compat
+// path). Not yet run on an armv7 kernel.
 const ctlValuePad = 4

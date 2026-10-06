@@ -19,5 +19,6 @@
 // architecture (big-endian, or a PowerPC/MIPS arch whose ioctl encoding differs)
 // rather than emitting wrong ioctls.
 // The pinned sizes/offsets/ioctl numbers are C-verified in
-// layout_lp64_test.go and layout_ilp32_test.go.
+// layout_lp64_test.go and layout_ilp32_test.go (the arm snd_ctl_elem_value
+// layout is the exception, see abi_arm.go).
 package alsa
