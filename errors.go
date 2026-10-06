@@ -8,8 +8,11 @@ import (
 	"time"
 )
 
-// ErrClosed is returned by Stream.Read once the stream has been closed.
-var ErrClosed = errors.New("capture: stream is closed")
+// ErrClosed is returned by Stream.Read once the stream has been closed, and on
+// Linux by every method of a Controls handle except Close once it has been
+// closed (a second Close returns nil). On other platforms OpenControls returns
+// ErrCapabilitiesUnsupported and no handle exists.
+var ErrClosed = errors.New("capture: closed")
 
 // ErrExclusiveNotAllowed reports that the device cannot be opened for exclusive
 // capture because exclusive access is disabled for it (Windows: "Allow
@@ -29,7 +32,10 @@ var ErrDeviceInUse = errors.New("capture: device is in use by another applicatio
 // was removed mid-query. Resolve returns it wrapped in a *DeviceNotFoundError
 // (which unwraps to it) when an id matches nothing present. A caller can
 // therefore retire the device with errors.Is(err, ErrDeviceGone) at any point
-// from resolution through the stream lifecycle. On Windows a Read parked while
+// from resolution through the stream lifecycle. On Linux, OpenControls and the
+// Controls methods return it when the card behind the control device is gone,
+// or, for a DeviceInfo with a stable id, is no longer the unit it named; a
+// numeric hw:N,D id is not verified against a unit. On Windows a Read parked while
 // the endpoint is invalidated is not woken yet, so it may not return until
 // Close.
 var ErrDeviceGone = errors.New("capture: device is gone")
@@ -45,10 +51,20 @@ var ErrDeviceGone = errors.New("capture: device is gone")
 // does not return it yet.
 var ErrDeviceStalled = errors.New("capture: device stopped delivering audio")
 
-// ErrCapabilitiesUnsupported reports that device capability queries such as
-// SupportedRates are not implemented on this platform (currently Linux/ALSA
-// only). Callers should fall back to a static rate list.
-var ErrCapabilitiesUnsupported = errors.New("capture: capability query not supported on this platform")
+// ErrCapabilitiesUnsupported reports that a device capability feature is not
+// implemented on this platform (currently Linux/ALSA only): capability queries
+// such as SupportedRates, and hardware controls (OpenControls and the Controls
+// methods). Callers should fall back to a static rate list, or to leaving the
+// gain alone. It is about the platform: on Linux a device that merely lacks a
+// control reports ErrControlNotFound instead.
+var ErrCapabilitiesUnsupported = errors.New("capture: not supported on this platform")
+
+// ErrControlNotFound reports that a hardware control element does not exist on
+// the device: no element has the requested id, or no element matches the capture
+// volume rule. It is matched with errors.Is on *ControlNotFoundError. Hardware
+// controls exist on Linux only; elsewhere OpenControls returns
+// ErrCapabilitiesUnsupported instead.
+var ErrControlNotFound = errors.New("capture: no such control")
 
 // BadDeviceError reports a device id that is not in any accepted form. On Linux
 // those are the stable forms "usb:vid:pid:s=serial:if=n,dev",
@@ -268,4 +284,96 @@ const fieldFormat = "format"
 
 func (e *ConfigError) Error() string {
 	return fmt.Sprintf("capture: invalid config: %s: %s", e.Field, e.Reason)
+}
+
+// ControlNotFoundError reports a control element lookup that found nothing. For
+// a lookup by id, ID is the element asked for (the kernel reports "no element
+// with that id", or the name cannot belong to any element: over 44 bytes or
+// containing a NUL). With Pattern set, the capture volume helper found no element
+// matching its rule (an INTEGER mixer element, readable and writable and active,
+// named "Capture Volume" or ending in " Capture Volume"). It unwraps to
+// ErrControlNotFound. It is returned on Linux only.
+type ControlNotFoundError struct {
+	ID      ControlID
+	Pattern bool
+}
+
+func (e *ControlNotFoundError) Error() string {
+	if e.Pattern {
+		return "capture: no capture volume control (want an active, readable and writable INTEGER mixer element named \"Capture Volume\" or ending in \" Capture Volume\")"
+	}
+	return fmt.Sprintf("capture: no such control %s", e.ID)
+}
+
+// Unwrap reports ErrControlNotFound, so errors.Is matches it.
+func (e *ControlNotFoundError) Unwrap() error { return ErrControlNotFound }
+
+// AmbiguousControlError reports that the capture volume helper found more than
+// one element matching its rule (for example an HDA codec with several "Capture
+// Volume" indices). The helper never picks one: pass one of Matches to Info, Get
+// or Set.
+type AmbiguousControlError struct {
+	Matches []ControlID
+}
+
+func (e *AmbiguousControlError) Error() string {
+	names := make([]string, 0, len(e.Matches))
+	for _, m := range e.Matches {
+		names = append(names, m.String())
+	}
+	return fmt.Sprintf("capture: %d controls match the capture volume rule (%s); pick one by id", len(e.Matches), strings.Join(names, ", "))
+}
+
+// Op values of ControlAccessError.
+const (
+	accessOpRead  = "read"
+	accessOpWrite = "write"
+)
+
+// ControlAccessError reports that a control cannot be read or written: the
+// element lacks the access bit or is inactive (checked before any write is
+// issued), or the kernel refused with EPERM. Locked is set when a write was
+// refused by the kernel although the element is writable, which means another
+// application holds its write lock.
+type ControlAccessError struct {
+	ID     ControlID
+	Op     string // "read" or "write"
+	Locked bool
+}
+
+func (e *ControlAccessError) Error() string {
+	if e.Locked {
+		return fmt.Sprintf("capture: control %s: write lock held by another application", e.ID)
+	}
+	return fmt.Sprintf("capture: control %s: %s not permitted (access bits or inactive)", e.ID, e.Op)
+}
+
+// ControlValueError reports a value the library refused to write, or that the
+// driver rejected. Values is what was asked for; Min, Max and Step describe the
+// element where they apply. Apart from a driver rejection ("rejected by the
+// driver", an EINVAL from the write) no ioctl was issued.
+type ControlValueError struct {
+	ID       ControlID
+	Values   []int64
+	Min, Max int64
+	Step     int64
+	Reason   string
+}
+
+// Error names the control, the values and the range only when they carry data:
+// a percent rejected before any element is chosen has none of them.
+func (e *ControlValueError) Error() string {
+	msg := "capture:"
+	if e.ID.Name != "" {
+		msg += " control " + e.ID.String() + ":"
+	}
+	msg += " invalid value"
+	if len(e.Values) > 0 {
+		msg += fmt.Sprintf(" %v", e.Values)
+	}
+	msg += ": " + e.Reason
+	if e.Min != 0 || e.Max != 0 || e.Step != 0 {
+		msg += fmt.Sprintf(" (range %d..%d, step %d)", e.Min, e.Max, e.Step)
+	}
+	return msg
 }

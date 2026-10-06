@@ -10,7 +10,8 @@ import (
 // The struct sizes, field offsets, and ioctl request numbers asserted here are
 // the kernel's own. The expected values are word-size specific and live in
 // layout_lp64_test.go (amd64, arm64, riscv64, loong64) and layout_ilp32_test.go
-// (386, arm) as the want* constants, each C-verified against
+// (386, arm) as the want* constants, each C-verified (except the arm
+// snd_ctl_elem_value layout, see layout_arm_test.go) against
 // /usr/include/sound/asound.h with an offsetof/sizeof probe (see the header
 // comment in each file).
 //
@@ -98,6 +99,30 @@ func TestXferiLayout(t *testing.T) {
 	}
 }
 
+func TestCtlLayout(t *testing.T) {
+	tests := []struct {
+		name string
+		got  uintptr
+		want uintptr
+	}{
+		{"sizeof(CtlElemID)", unsafe.Sizeof(CtlElemID{}), wantCtlElemIDSize},
+		{"sizeof(ctlElemList)", unsafe.Sizeof(ctlElemList{}), wantCtlListSize},
+		{"offsetof(ctlElemList.Pids)", unsafe.Offsetof(ctlElemList{}.Pids), wantCtlListPids},
+		{"sizeof(CtlElemInfo)", unsafe.Sizeof(CtlElemInfo{}), wantCtlInfoSize},
+		{"offsetof(CtlElemInfo.Value)", unsafe.Offsetof(CtlElemInfo{}.Value), wantCtlInfoValue},
+		{"offsetof(CtlElemInfo.Reserved)", unsafe.Offsetof(CtlElemInfo{}.Reserved), wantCtlInfoReserved},
+		{"sizeof(ctlElemValue)", unsafe.Sizeof(ctlElemValue{}), wantCtlValueSize},
+		{"offsetof(ctlElemValue.Value)", unsafe.Offsetof(ctlElemValue{}.Value), wantCtlValueValue},
+		{"offsetof(ctlElemValue.Reserved)", unsafe.Offsetof(ctlElemValue{}.Reserved), wantCtlValueReserved},
+		{"sizeof(ctlTLVHeader)", unsafe.Sizeof(ctlTLVHeader{}), wantCtlTLVSize},
+	}
+	for _, tt := range tests {
+		if tt.got != tt.want {
+			t.Errorf("%s = %d, want %d", tt.name, tt.got, tt.want)
+		}
+	}
+}
+
 func TestIoctlNumbers(t *testing.T) {
 	tests := []struct {
 		name string
@@ -114,6 +139,12 @@ func TestIoctlNumbers(t *testing.T) {
 		{"Drop", iocDrop, wantIocDrop},
 		{"Resume", iocResume, wantIocResume},
 		{"ReadIFrames", iocReadIFrames, wantIocReadI},
+		{"CtlPVersion", iocCtlPVersion, wantIocCtlPVersion},
+		{"CtlElemList", iocCtlElemList, wantIocCtlElemList},
+		{"CtlElemInfo", iocCtlElemInfo, wantIocCtlElemInfo},
+		{"CtlElemRead", iocCtlElemRead, wantIocCtlElemRead},
+		{"CtlElemWrite", iocCtlElemWrite, wantIocCtlElemWrite},
+		{"CtlTLVRead", iocCtlTLVRead, wantIocCtlTLVRead},
 	}
 	for _, tt := range tests {
 		if tt.got != tt.want {

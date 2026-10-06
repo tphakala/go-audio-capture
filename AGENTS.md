@@ -39,9 +39,9 @@ These are the reason the library exists. A change that violates one is wrong eve
 1. **No silent conversion.** The requested rate, channel count and sample format are negotiated exactly or `Open` fails with a typed error (`*BadRateError`, `*BadFormatError`, `*ConfigError`). Never resample, up/down-mix, convert formats, or fall back to a "close enough" rate. `Stream.Negotiated` reports what the hardware actually agreed to. Buffering parameters (period size, period count) are not audio conversion and may be adjusted to what the driver accepts, or raised to the Linux floor (1 ms period, 20 ms buffer), as long as `Negotiated` reports the result.
 2. **No userspace audio layers.** Linux is `hw:`-level only: no `plug`, `dsnoop`, `dmix`, `default`. Windows is exclusive mode only: no shared mode, never `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`.
 3. **No cgo, ever.** Everything must build with `CGO_ENABLED=0`. The only runtime dependency is `golang.org/x/sys`. (`go-ruleguard/dsl` is lint-only, behind a build tag.)
-4. **Typed, specific errors.** Errors name the failing ioctl or COM call and wrap errno/HRESULT. Map conditions to the sentinels in `errors.go` (`ErrClosed`, `ErrDeviceGone`, `ErrDeviceInUse`, `ErrDeviceStalled`, `ErrExclusiveNotAllowed`, `ErrCapabilitiesUnsupported`) so callers can use `errors.Is`/`errors.As`. Never surface an opaque "invalid argument".
+4. **Typed, specific errors.** Errors name the failing ioctl or COM call and wrap errno/HRESULT. Map conditions to the sentinels in `errors.go` (`ErrClosed`, `ErrDeviceGone`, `ErrDeviceInUse`, `ErrDeviceStalled`, `ErrExclusiveNotAllowed`, `ErrCapabilitiesUnsupported`, `ErrControlNotFound`) so callers can use `errors.Is`/`errors.As`. Never surface an opaque "invalid argument".
 5. **Stable device ids.** On Linux `DeviceInfo.ID` is derived from sysfs (USB serial, USB port, or `hw:CARD=<id>,DEV=<n>`), not the probe-order card index. `HWAddr` (`hw:N,D`) is display-only. A stable id is resolved on every `Open`/`SupportedRates*`/`Resolve` call, never cached, and re-verified after the device is opened. `OpenDevice` takes an already-resolved `DeviceInfo` and skips the search, but still re-verifies `ID` and `PortID` against live sysfs after the open. The one exception is a USB serial-form `ID` with no `PortID`: nothing read after the open tells same-serial twins apart, so `resolveDeviceInfo` falls back to the full search (`resolveForOpen`) on purpose, to keep the ambiguity check; do not remove it as a redundant enumeration. Ambiguity (two units with one serial) is an error, never a guess.
-6. **ABI correctness over convenience.** `internal/alsa` mirrors `sound/asound.h`. Struct layouts and size-encoded ioctl numbers differ between LP64 and ILP32 and are pinned in layout tests. Unsupported GOARCHes (big-endian, PowerPC, MIPS) must fail to build via the `unsupported_GOARCH` sentinel in `abi_unsupported.go`, not compile with wrong numbers.
+6. **ABI correctness over convenience.** `internal/alsa` mirrors `sound/asound.h`. Struct layouts and size-encoded ioctl numbers differ between LP64 and ILP32 and are pinned in layout tests; `snd_ctl_elem_value` also differs between 386 and arm. Unsupported GOARCHes (big-endian, PowerPC, MIPS) must fail to build via the `unsupported_GOARCH` sentinel in `abi_unsupported.go`, not compile with wrong numbers.
 7. **Zero allocations in steady-state `Read`.** Both backends are allocation-free on the capture path; alloc tests guard this. Error paths may allocate.
 8. **Concurrency contract.** `Read` is single-consumer and blocking. `Close` may be called from another goroutine and must unblock a parked `Read`, which then returns `ErrClosed`. A `Close` always wins over any other classification. No ioctl or COM call may run on a handle after it is closed.
 9. **Never hang, never spin.** Every wait, retry and recovery loop is bounded or wakes on `Close`. A busy device fails `Open` at once rather than blocking until it is free.
@@ -72,6 +72,12 @@ This is the robustness contract. A change to any row is a behaviour change and n
 | Device delivers fewer frames than its rate with no overrun (small period geometry, driver pointer runs slow) | window of max(2 s, 20 buffers) with a 10% tolerance plus one buffer: `*ShortfallError` (`ErrDeviceStalled`); `ErrDeviceGone` instead when a `PVERSION` probe at that point shows the device gone | not detected yet | close and reopen, with a larger `PeriodFrames`/`Periods` if it repeats |
 | Device unplugged mid-stream | `ErrDeviceGone`, including while `Read` is parked and when the device vanishes during a recovery burst | `ErrDeviceGone` once `GetBuffer` sees the invalidation; a parked `Read` is not woken yet | close; wait for the device to reappear |
 | `Close` from another goroutine | `ErrClosed` | `ErrClosed` | stop reading |
+| No such control element (`Controls.Info`/`Get`/`Set`), or a name over 44 bytes or with a NUL | `*ControlNotFoundError` (unwraps to `ErrControlNotFound`), never `ErrDeviceGone` | n/a (`ErrCapabilitiesUnsupported`) | the element is not on this card; do not retire the device |
+| Capture volume helper finds no element, or several | `*ControlNotFoundError{Pattern: true}`, `*AmbiguousControlError` | n/a (`ErrCapabilitiesUnsupported`) | leave the gain alone, or pick a `ControlID` |
+| Control read-only, inactive, or write lock held by another file (`EPERM`) | `*ControlAccessError` (`Locked` for the lock) | n/a (`ErrCapabilitiesUnsupported`) | nothing to set, or retry later |
+| Control value wrong count, out of range, off the kernel step rule, unsupported type (BYTES, IEC958, INTEGER64), or `EINVAL` from the driver | `*ControlValueError`; no write is issued except for the driver's own `EINVAL` | n/a (`ErrCapabilitiesUnsupported`) | pass a valid value |
+| `OpenControls` on a stable id whose card is not the unit the `DeviceInfo` names (a numeric `hw:N,D` id is not verified), `ENODEV` or `ENOENT` with the card absent from `/proc/asound` on open, or a control call after unplug (`ENODEV`, or any failure followed by a `PVERSION` probe that fails with `ENODEV`) | `ErrDeviceGone` | n/a (`ErrCapabilitiesUnsupported`) | close; `Resolve` again and wait for the device to reappear |
+| `Controls` method after `Close` | `ErrClosed` | n/a (`ErrCapabilitiesUnsupported`) | stop using the handle |
 
 Any error returned by `Read` leaves the stream unusable; the caller must `Close` it. Platform gaps in the Windows column are tracked in GitHub issues and should not be copied as intended behaviour.
 
@@ -88,6 +94,9 @@ stream_linux.go       Open/OpenDevice/Stream on Linux; drives the `pcm` interfac
                       recovery budget and terminalError classification
 capabilities_linux.go SupportedRates (HW_REFINE only) and SupportedRatesVerified (HW_PARAMS probe)
 capabilities_other.go Non-Linux stubs returning ErrCapabilitiesUnsupported
+controls.go           Control types (ControlID, ControlInfo, enums), dB conversion, the step rule
+controls_linux.go     OpenControls and Controls (ALSA control device; openCtl seam), capture volume helper
+controls_other.go     Non-Linux stubs returning ErrCapabilitiesUnsupported
 
 devices_windows.go    Devices() via WASAPI endpoint enumeration
 stream_windows.go     Open/OpenDevice/Stream on Windows (openEndpoint seam)
@@ -95,11 +104,13 @@ stream_windows.go     Open/OpenDevice/Stream on Windows (openEndpoint seam)
 internal/alsa/        Kernel ABI: hwparams/swparams structs, ioctl numbers, PCM (OpenPCM,
                       Negotiate, Start, ReadI, Recover, Probe, Close), IsDeviceGone and
                       IsRecoverable errno sets, rate probing. abi_lp64.go / abi_ilp32.go pick
-                      word-width types; abi_unsupported.go is the build guard.
+                      word-width types; abi_unsupported.go is the build guard. ctl.go/tlv.go: the control
+                      interface (OpenCtl, List, Info, ReadValues, WriteValues, TLV, IsCtlGone)
+                      and the dB TLV parser; abi_386.go/abi_arm.go pad snd_ctl_elem_value.
 internal/wasapi/      COM vtables (com.go), enumeration, IAudioClient setup and format
                       negotiation (client.go, format.go), HRESULT mapping (errors.go)
 
-cmd/gac-rec/          Debug recorder for hardware validation (-list, -d, -r, -c, -f, -t, -o, -p, -n, -rates)
+cmd/gac-rec/          Debug recorder for hardware validation (-list, -d, -r, -c, -f, -t, -o, -p, -n, -rates, -controls, -set, -capture-volume)
 rules/rules.go        gocritic ruleguard matchers (build tag `ruleguard`, lint-only)
 testdata/proc_asound/ Committed /proc/asound fixtures
 ```
@@ -123,17 +134,21 @@ These explain code that otherwise looks odd. Check against `sound/core/pcm_nativ
 - The ALSA core sees only the ring position and corrects at most one wrap per update; a driver that moves a whole buffer between updates (snd-aloop steps in jiffies) loses frames silently, and the jiffies check that would catch it runs only with xrun_debug. This is why `applyGeometryFloor` raises the requested buffer to at least 20 ms, by adding periods.
 - A non-integer interval can come back from a refine with `openmin`/`openmax` set, where `Min`/`Max` are excluded values; `refineNear` steps over them.
 - A driver's hardware pointer can advance slower than real time with no errno: `ReadI` keeps succeeding on a pointer that is already short and no xrun is raised (issue #27: snd-usb-audio capture URBs of one microframe for sub-millisecond periods; snd-aloop moving whole jiffies against a buffer of a few milliseconds). `Read` therefore counts delivered frames against a monotonic clock (`checkShortfall`, clock seam `monoNow`). The window starts at the first successful read (a stream read without `Start` must not flag) and restarts after every `Recover` and every evaluation. It is max(2 s, 20 buffers) long, so the buffer's worth of frames that can sit unread stays at or under half the 10% tolerance; arithmetic is int64 because a 32-bit `int` cannot hold elapsed ns times rate.
+- Control fds (`/dev/snd/controlC*`) have their own errno meanings (`sound/core/control.c`): `ENOENT` is "no element with that id", `ENXIO` from `TLV_READ` is "element has no readable TLV", so `alsa.IsDeviceGone` must not classify them. After `snd_card_disconnect` swaps the file operations every ioctl returns `ENODEV` (`init.c`, `snd_shutdown_f_ops`); `PVERSION` on a live control fd is a bare `put_user` that never fails and never returns `EBADFD`, so one probe returning `ENODEV` tells an unplug from an element error. An ioctl already inside a driver callback at unplug returns what the driver returns (not measured).
+- A nonzero numid wins over the name tuple in a control lookup, numids are assigned in creation order per card instance, and names compare as 44 bytes (`strncmp`), so a stored numid can name another element and a longer name sent truncated matches whatever shares its first 44 bytes. Requests therefore always carry numid 0 and the tuple; a name over 44 bytes is rejected before the ioctl.
+- The kernel validates a driver element's written value (range, and `value % step == 0` computed unsigned on the value itself, not on `value - min`) only with `CONFIG_SND_CTL_INPUT_VALIDATION`; user-created elements are always validated. `Controls.Set` validates against `ELEM_INFO` itself with the same rule. `ELEM_WRITE` returns 0 whether or not the value changed.
+- `TLV_READ` copies the item after the 8-byte header and never writes the header's length back, so the size comes from the item's own length word. `snd_ctl_elem_value` is 1224 bytes on LP64, 708 on i386 (and 32-bit x86 processes on an x86_64 kernel) and 712 on ARM EABI (and on 64-bit non-x86 kernels through `control_compat.c`), because its union holds a `long long`; ELEM_READ and ELEM_WRITE encode that size, so a wrong value fails with `ENOTTY`.
 
 ## Testing approach
 
 Tests run without audio hardware. Each layer has an injection seam:
 
-- `internal/alsa`: `PCM` holds an `ioctlFunc`; tests construct it with `newPCM(fd, fake)`. `fakeKernel` in `lifecycle_test.go` models the PCM state machine so a test cannot claim a recovery the kernel would refuse; `fakeRateDevice` and `fakeCommitDevice` (`rates_test.go`) cover negotiation; `fakeStepDevice` (`geometry_test.go`) models narrowing refines, `rmask`, a period-bytes step rule, a buffer cap and a channel range, and `fakeStatefulRateDevice` models OPEN/SETUP with `HW_FREE`. Fakes must narrow intervals the way the kernel does (`narrowInterval`); a fake that overwrites a pinned interval would let a wrong pin pass. `sysOpen`, `sysSetNonblock` and `resumeSleep` are package seams for the open flags and the RESUME retry wait.
-- Root package, Linux: package-level function vars `openPCM` (stream), `openRatePCM` (capabilities) and `monoNow` (the shortfall clock; `stream_shortfall_linux_test.go` drives it with a fake clock, so no test sleeps) are swapped for fakes (`fakePCM` in `stream_linux_test.go`; lifecycle and recovery-budget cases in `stream_lifecycle_linux_test.go`).
+- `internal/alsa`: `PCM` holds an `ioctlFunc`; tests construct it with `newPCM(fd, fake)`. `fakeKernel` in `lifecycle_test.go` models the PCM state machine so a test cannot claim a recovery the kernel would refuse; `fakeRateDevice` and `fakeCommitDevice` (`rates_test.go`) cover negotiation; `fakeStepDevice` (`geometry_test.go`) models narrowing refines, `rmask`, a period-bytes step rule, a buffer cap and a channel range, and `fakeStatefulRateDevice` models OPEN/SETUP with `HW_FREE`. Fakes must narrow intervals the way the kernel does (`narrowInterval`); a fake that overwrites a pinned interval would let a wrong pin pass. `fakeCtlKernel` (`ctl_test.go`) models the control device: numid-then-tuple lookup with a 44-byte name compare, `ENOENT`/`EPERM`/`ENXIO`/`ENOMEM`, TLV copied without rewriting the header length, `ENODEV` once disconnected, `ENOTTY` for an unknown request number, and range and step checks only for user elements or when `validate` is set. `sysOpen`, `sysSetNonblock` and `resumeSleep` are package seams for the open flags and the RESUME retry wait.
+- Root package, Linux: package-level function vars `openPCM` (stream), `openRatePCM` (capabilities), `openCtl` (controls) and `monoNow` (the shortfall clock; `stream_shortfall_linux_test.go` drives it with a fake clock, so no test sleeps) are swapped for fakes (`fakePCM` in `stream_linux_test.go`, `fakeCtl` in `controls_linux_test.go`; lifecycle and recovery-budget cases in `stream_lifecycle_linux_test.go`).
 - Device identity: `devicesFrom(procDir, sysDir)` takes roots; `deviceid_fixture_linux_test.go` builds throwaway `/proc/asound` and `/sys` trees with symlinks under `t.TempDir()` (sysfs symlinks cannot be committed).
 - Windows: `openEndpoint` var in `stream_windows.go`; WASAPI fill and format logic are tested directly.
-- Layout tests (`layout_lp64_test.go`, `layout_ilp32_test.go`) assert C-verified struct sizes, offsets and ioctl numbers. ILP32 assertions only execute under `GOARCH=386`.
-- Hardware tests are opt-in: `GAC_HW_TEST=hw:1,0 go test -run TestHardwareSupportedRates -v`. They never run in CI.
+- Layout tests (`layout_lp64_test.go`, `layout_ilp32_test.go`) assert C-verified struct sizes, offsets and ioctl numbers. ILP32 assertions only execute under `GOARCH=386`. The i386 numbers are an oracle for arm except `snd_ctl_elem_value`, which has its own `layout_386_test.go` and `layout_arm_test.go`; `GOARCH=386` does not execute the arm one. Check arm by cross-compiling the test binary (`GOARCH=arm go test -c`) and running it on a Raspberry Pi with an aarch64 kernel that runs 32-bit processes (it exercises `control_compat.c`'s 712-byte struct), or on an armv7 kernel.
+- Hardware tests are opt-in: `GAC_HW_TEST=hw:1,0 go test -run TestHardwareSupportedRates -v` and `GAC_HW_CTL_TEST=hw:1,0 go test -run TestHardwareControls -v` (lists and reads every control, and an `ENOTTY` anywhere means a layout is wrong; `GAC_HW_CTL_WRITE=1` also writes one element its current value). They never run in CI.
 
 New behaviour gets a test through the relevant seam. Bug fixes get a regression test that fails before the fix. A test must be able to fail: check that the assertion would break if the fixed line were reverted, and avoid fixtures where every path produces the same result.
 
@@ -167,7 +182,7 @@ Run `task check` before pushing. Linux-only tooling does not compile or lint the
 - Lint config is `.golangci.yaml` (gocritic with ruleguard, revive, errorlint, exhaustive with `default` counting as exhaustive, gocognit 50). Use `errors.New` for constant messages, not `fmt.Errorf`.
 - Error strings are prefixed `capture:` in the root package, `alsa:` and `wasapi:` in the internal packages. Wrap with `%w`.
 - Comments explain why (kernel or WASAPI behaviour, the failure being avoided), and name the ioctl, struct or COM call involved. Match the existing density.
-- Errno and HRESULT sets that classify errors live in one place each (`alsa.IsDeviceGone`, `alsa.IsRecoverable`, `hresultError.Unwrap`); extend those rather than adding a second list.
+- Errno and HRESULT sets that classify errors live in one place each (`alsa.IsDeviceGone`, `alsa.IsRecoverable`, `hresultError.Unwrap`, and `alsa.IsCtlGone` for control fds, where `ENOENT` and `ENXIO` are element errors); extend those rather than adding a second list.
 - Behaviour that exists on one platform only is documented as such ("On Linux ...") in README, godoc and here.
 - Adding a sample format touches: `Format` constants and `ParseFormat`/`String`/`BytesPerSample`/`IsFloat` in `capture.go`, the ALSA format mapping in `internal/alsa`, the WASAPI `SampleFormat` mapping in `internal/wasapi/format.go` (or an explicit `*ConfigError` rejection), `cmd/gac-rec` WAV header handling, tests on each side, and the README "Sample formats" section.
 - Adding a Linux architecture means verifying the layout against `sound/asound.h` in C, adding the GOARCH to the `abi_*.go` build tags and layout test tags, and adding a cross-build to `Taskfile.yml` and CI.
@@ -184,6 +199,7 @@ Flag these, they are real defects here:
 - A path where `Open`, `Start` or `Read` can block forever, or a retry or recovery loop with no bound and no `Close` wake-up.
 - An ioctl or COM call that can run after `Close` has released the handle, or a `Close` that does not unblock a parked `Read`.
 - A new error path that returns a raw errno, HRESULT or `fmt.Errorf` string where a sentinel or typed error from the table above applies, or an error mapped to the wrong sentinel (an unplug reported as a stall, a close reported as a device loss).
+- A control write that skips validation against `ELEM_INFO`, a caller-supplied numeric id sent to the kernel instead of the name tuple, or `alsa.IsDeviceGone` used on a control ioctl error.
 - An allocation on the steady-state `Read` path.
 - An ioctl struct or number change without a matching layout test update for both LP64 and ILP32.
 - A test that cannot fail on the behaviour it names, or a doc sentence that is false for some platform.
@@ -191,7 +207,7 @@ Flag these, they are real defects here:
 Intentional, do not flag:
 
 - `unsafe.Pointer` conversions when passing structs to ioctls and COM vtables; layouts are pinned by the layout tests.
-- Package-level function variables (`openPCM`, `openRatePCM`, `openEndpoint`, `monoNow`, `sysOpen`, `sysSetNonblock`, `resumeSleep`) used as test seams.
+- Package-level function variables (`openPCM`, `openRatePCM`, `openCtl`, `openEndpoint`, `monoNow`, `sysOpen`, `sysSetNonblock`, `resumeSleep`) used as test seams.
 - Ignored errors from best-effort cleanup (`_ = p.Close()` on an error path, `Close`'s `DROP`).
 - Mutexes that are never held across a blocking syscall; `Close` coordinates through the in-flight count instead.
 - Magic numbers in `internal/alsa` and `internal/wasapi` that mirror kernel or Windows headers.

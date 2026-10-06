@@ -33,6 +33,13 @@ type sframes int32
 
 const boundaryCap uframes = 0
 
+type clong int32
+
+const (
+	ctlValueBytes = 512
+	ctlValuePad   = 0
+)
+
 // The build stops here on an unverified GOARCH. The identifier is intentionally
 // undefined so the compiler error itself reads as the reason.
 var _ = goAudioCapture_ALSA_backend_unsupported_GOARCH_verify_struct_layout_per_arch_see_issue_12

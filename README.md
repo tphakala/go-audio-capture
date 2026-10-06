@@ -133,6 +133,42 @@ if errors.Is(err, capture.ErrDeviceGone) {
 
 On Linux `DeviceInfo.HWAddr` is the current-boot `hw:card,device` for display, logs, and `arecord`; it is not stable and must not be persisted. (On Windows HWAddr equals the endpoint id, which is stable; see the Windows section.)
 
+### Hardware gain controls (Linux)
+
+`OpenControls` opens a card's ALSA control device (`/dev/snd/controlC<N>`) so a service can read and set mixer elements such as capture gain without `amixer` or libasound. It is separate from `Open` on purpose: opening a stream never reads or changes a control, and the library never applies a gain on its own.
+
+```go
+d, err := capture.Resolve("usb:16d0:06f3:s=0384_2474750763FA81C9:if=0,0")
+if err != nil {
+    return err
+}
+c, err := capture.OpenControls(d)
+if err != nil {
+    return err // ErrDeviceGone if a stable id's card is not the unit d names
+}
+defer c.Close()
+
+raw, err := c.SetCaptureVolumePercent(60) // linear in raw steps, returns the raw value written
+switch {
+case errors.Is(err, capture.ErrControlNotFound):
+    // The device has no capture volume (the AudioMoth, for one): leave the gain alone.
+case errors.As(err, new(*capture.AmbiguousControlError)):
+    // Several capture volumes: pick one from List and use Set with its ControlID.
+case err != nil:
+    return err
+}
+info, _ := c.CaptureVolume()
+if db, ok := info.ValueDB(raw); ok {
+    log.Printf("%s = %d (%.1f dB)", info.ID, raw, db)
+}
+```
+
+`List`, `Info`, `Get` and `Set` work on BOOLEAN, INTEGER and ENUMERATED elements; BYTES, IEC958 and INTEGER64 elements are listed but cannot be read or written (`*ControlValueError`). `Set` takes one raw value per `Count` and checks type, access, count, range and the kernel's step rule before it writes, because the kernel validates driver elements only when built with `CONFIG_SND_CTL_INPUT_VALIDATION`; a refused value is a `*ControlValueError` and nothing is written. The kernel's step rule tests the value itself, not its distance from `Min`, so with a `Step` above 1 and a negative `Min` the accepted values are not what one might expect. dB information (`HasDB`, `MinDB`, `MaxDB`, `ValueDB`) comes from the element's TLV and is read-only: there is no dB setter.
+
+`CaptureVolume` selects the one active, readable and writable INTEGER mixer element named `Capture Volume` or ending in ` Capture Volume`. No match is `*ControlNotFoundError` (which matches `ErrControlNotFound`); several is `*AmbiguousControlError` listing them. It never prefers one over another. `SetCaptureVolumePercent` maps the percentage linearly onto the raw range (`amixer set N%` does the same, in raw steps, not dB), rounds half away from zero, and moves to the nearest value the step rule accepts.
+
+Persist a `ControlID` (interface, device, subdevice, name, index), not its `NumID`: numeric ids are assigned in creation order and can name a different element after a driver reload or replug. Settings are not sticky: another mixer, PipeWire or `alsactl restore` can change the gain afterwards, and there is no read-back after `Set` (a driver that quantizes on write leaves a different value without an error, so call `Get`). A `Controls` handle opened from a stable id is bound to the card it verified: after an unplug it returns `ErrDeviceGone` even if another unit takes the card number. A numeric `hw:N,D` id is not verified, as with `OpenDevice`, and a control node that is missing on a present card is returned as the open error. Every other platform returns `ErrCapabilitiesUnsupported`. `gac-rec -controls`, `-set` and `-capture-volume` drive the same calls from the command line.
+
 ### Upgrading from v0.5.x
 
 `DeviceInfo.ID` changed meaning on Linux in this release. In v0.5.x it was the current-boot `hw:card,device` address; it is now the sysfs-derived stable id described above. This is a behaviour change with no signature change, so `go get -u` picks it up silently across the v0 minor. Three things to check:
@@ -163,7 +199,7 @@ go run ./cmd/gac-rec -d hw:1,0 -c 2 -f s16 -rates                        # Suppo
 
 Validated against the `snd-aloop` loopback (the same kernel ioctl path as a physical card) at 48/192/384 kHz S16 and 48 kHz S32, FFT-verified: a 60 kHz tone at 384 kHz round-trips with all spectral energy above 24 kHz and zero xruns, the exact ultrasonic case dsnoop broke. On real hardware it has captured from a 384 kHz AudioMoth, a ZOOM AMS-24 and a Focusrite Scarlett Solo 4th Gen, on amd64 and on arm64 (Raspberry Pi 4), including unplug, busy-device and forced-overrun tests.
 
-Architectures: the Linux backend supports the little-endian LP64 arches (`amd64`, `arm64`, `riscv64`, `loong64`) and little-endian ILP32 arches (`386`, `arm`), all of which use the generic `asm-generic/ioctl.h` encoding. `amd64`, `arm64`, `386`, and `arm` are additionally hardware-validated; `riscv64` and `loong64` build on the identical, C-verified LP64 layout and ioctl numbers. The kernel's `snd_pcm_uframes_t` is a C `unsigned long`, so the ioctl struct layouts and the size-encoded ioctl numbers differ between 64- and 32-bit builds; both sets are pinned against `sound/asound.h` (the 32-bit set C-verified with `gcc -m32`) and asserted in the layout tests, with the ILP32 assertions run under `GOARCH=386`. A 32-bit binary was validated capturing from real USB hardware (a 384 kHz AudioMoth mic and a ZOOM AMS-24) through the kernel's 32-bit compat path, negotiating byte-for-byte identically to the 64-bit build. Any other `GOARCH` fails to build rather than silently emitting wrong ioctl numbers: big-endian targets (their `snd_interval` flag bit-packing is little-endian only) and the PowerPC and MIPS families including the little-endian `ppc64le`/`mips64le` (they use an architecture-specific ioctl encoding, so supporting them needs a per-arch ioctl encoder, not just this layout).
+Architectures: the Linux backend supports the little-endian LP64 arches (`amd64`, `arm64`, `riscv64`, `loong64`) and little-endian ILP32 arches (`386`, `arm`), all of which use the generic `asm-generic/ioctl.h` encoding. `amd64`, `arm64`, `386`, and `arm` are additionally hardware-validated; `riscv64` and `loong64` build on the identical, C-verified LP64 layout and ioctl numbers. The kernel's `snd_pcm_uframes_t` is a C `unsigned long`, so the ioctl struct layouts and the size-encoded ioctl numbers differ between 64- and 32-bit builds; both sets are pinned against `sound/asound.h` (the 32-bit set C-verified with `gcc -m32`) and asserted in the layout tests, with the ILP32 assertions run under `GOARCH=386`. The control interface's `snd_ctl_elem_value` differs on `arm` (712 bytes against 708 on `386`); that layout is derived from the kernel source and was checked live only through a `GOARCH=arm` binary on an aarch64 kernel, not on an armv7 kernel. A 32-bit binary was validated capturing from real USB hardware (a 384 kHz AudioMoth mic and a ZOOM AMS-24) through the kernel's 32-bit compat path, negotiating byte-for-byte identically to the 64-bit build. Any other `GOARCH` fails to build rather than silently emitting wrong ioctl numbers: big-endian targets (their `snd_interval` flag bit-packing is little-endian only) and the PowerPC and MIPS families including the little-endian `ppc64le`/`mips64le` (they use an architecture-specific ioctl encoding, so supporting them needs a per-arch ioctl encoder, not just this layout).
 
 ## Phase 2: Windows WASAPI
 
@@ -213,6 +249,12 @@ What a caller sees for each failure, and what to do about it. Anything `Read` re
 | Exclusive access disabled for the endpoint (Windows) | `ErrExclusiveNotAllowed` | the user changes the endpoint setting |
 | Configured device not attached, or the `DeviceInfo` passed to `OpenDevice` no longer names the card it was resolved to (Linux) | `ErrDeviceGone` (`*DeviceNotFoundError`, which unwraps to it, for a stable id on Linux and from `Resolve` on both platforms) | wait for it to reappear (`Resolve` again), then open |
 | `DeviceInfo` passed to `OpenDevice` is empty or inconsistent | `*ConfigError` (empty `ID`), `*BadDeviceError` (on Linux, fields that disagree before the open; a wrong `Card` with a stable `ID` is `ErrDeviceGone` after it; `Card` is not used for a serial-form `ID` without `PortID`) | pass a `DeviceInfo` from `Devices` or `Resolve` |
+| No such control, or no capture volume on the device (Linux; `OpenControls` and `Controls` elsewhere return `ErrCapabilitiesUnsupported`) | `*ControlNotFoundError` (`ErrControlNotFound`) | leave the gain alone, or pick another control |
+| Several controls match the capture volume rule (Linux) | `*AmbiguousControlError` | choose one from `List` and use `Set` |
+| Control read-only, inactive or write-locked by another application (Linux) | `*ControlAccessError` | nothing to set, or retry later if `Locked` |
+| Control value out of range, wrong count, off the step rule, unsupported type, or refused by the driver (Linux) | `*ControlValueError` (nothing written unless the driver refused) | pass a valid value |
+| Card unplugged during `OpenControls` or a control call, or a stable id's card swapped (Linux) | `ErrDeviceGone` | close, wait for the device to reappear |
+| `Controls` used after `Close` (Linux) | `ErrClosed` | stop using it |
 | Two identical units with one serial (Linux) | `*AmbiguousDeviceError` | configure one of the listed ids |
 | Overrun, consumer too slow | none: recovered and counted in `Xruns()` | watch the counter |
 | System suspend and resume (Linux) | none: recovered and counted | nothing |

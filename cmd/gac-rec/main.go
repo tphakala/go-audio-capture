@@ -31,10 +31,41 @@ func main() {
 	periodFrames := flag.Int("p", 0, "period size in frames (0 = default, rate/50 on Linux); the device may adjust it; on Linux at least 1 ms")
 	periods := flag.Int("n", 0, "periods per buffer (0 = default, 4 on Linux); the device may adjust it; on Linux raised to reach a 20 ms buffer")
 	rates := flag.Bool("rates", false, "print SupportedRates and SupportedRatesVerified for -d/-c/-f with elapsed time, then exit")
+	controls := flag.Bool("controls", false, "list the hardware controls (mixer elements) of -d with their values and dB ranges, then exit (Linux)")
+	setCtl := flag.String("set", "", "set a control of -d, as 'NAME[#INDEX]=V[,V...]' (raw values, one per channel), then print it and exit (Linux)")
+	capVol := flag.Float64("capture-volume", 0, "set the capture volume of -d to this percent (0-100) of its raw range, then exit (Linux)")
 	flag.Parse()
+	// Visited flags, so an explicit "-capture-volume 0" or an empty "-set" is a
+	// control command instead of falling through to recording.
+	capVolSet, setCtlSet := false, false
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "capture-volume":
+			capVolSet = true
+		case "set":
+			setCtlSet = true
+		}
+	})
 
 	if *list {
 		if err := listDevices(); err != nil {
+			fatal(err)
+		}
+		return
+	}
+	switch {
+	case *controls:
+		if err := printControls(*device); err != nil {
+			fatal(err)
+		}
+		return
+	case setCtlSet:
+		if err := setControl(*device, *setCtl); err != nil {
+			fatal(err)
+		}
+		return
+	case capVolSet:
+		if err := setCaptureVolume(*device, *capVol); err != nil {
 			fatal(err)
 		}
 		return

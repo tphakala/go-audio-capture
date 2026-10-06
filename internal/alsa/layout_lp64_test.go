@@ -53,4 +53,24 @@ const (
 	wantIocDrop     = 0x4143
 	wantIocResume   = 0x4147
 	wantIocReadI    = 0x80184151
+
+	// Control interface (snd_ctl_*), C-verified the same way. The value struct
+	// has 4 bytes of padding before its 8-aligned union.
+	wantCtlElemIDSize    = 64
+	wantCtlListSize      = 80
+	wantCtlListPids      = 16
+	wantCtlInfoSize      = 272
+	wantCtlInfoValue     = 80
+	wantCtlInfoReserved  = 208
+	wantCtlValueSize     = 1224
+	wantCtlValueValue    = 72
+	wantCtlValueReserved = 1096
+	wantCtlTLVSize       = 8
+
+	wantIocCtlPVersion  = 0x80045500
+	wantIocCtlElemList  = 0xc0505510
+	wantIocCtlElemInfo  = 0xc1105511
+	wantIocCtlElemRead  = 0xc4c85512
+	wantIocCtlElemWrite = 0xc4c85513
+	wantIocCtlTLVRead   = 0xc008551a
 )

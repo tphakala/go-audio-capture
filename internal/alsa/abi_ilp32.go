@@ -13,6 +13,10 @@ package alsa
 // the kernel's compat_ioctl path (snd_pcm_ioctl_compat), so these are the numbers
 // the kernel expects from an ILP32 process on either a 32-bit or a 64-bit kernel.
 //
+// snd_ctl_elem_value is the one structure that differs between 386 and arm: its
+// value union holds a long long, which i386 aligns to 4 and ARM EABI to 8. The
+// padding before the union therefore lives in abi_386.go and abi_arm.go.
+//
 // Defined types, not aliases: see the note in abi_lp64.go.
 type uframes uint32
 type sframes int32
@@ -21,3 +25,9 @@ type sframes int32
 // in pcm.go. 1<<30 keeps both the boundary and the *2 in the doubling loop inside
 // a 32-bit uframes and below LONG_MAX (2^31-1, the kernel's signed hw_ptr limit).
 const boundaryCap uframes = 1 << 30
+
+// clong mirrors the kernel's C long (see abi_lp64.go); ctlValueBytes is the size
+// of the snd_ctl_elem_value value union, 128 longs of 4 bytes.
+type clong int32
+
+const ctlValueBytes = 512
