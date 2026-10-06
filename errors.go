@@ -8,8 +8,9 @@ import (
 	"time"
 )
 
-// ErrClosed is returned by Stream.Read once the stream has been closed, and by
-// every method of a Controls handle once it has been closed.
+// ErrClosed is returned by Stream.Read once the stream has been closed, and on
+// Linux by every method of a Controls handle once it has been closed. On other
+// platforms OpenControls returns ErrCapabilitiesUnsupported and no handle exists.
 var ErrClosed = errors.New("capture: closed")
 
 // ErrExclusiveNotAllowed reports that the device cannot be opened for exclusive
@@ -59,7 +60,9 @@ var ErrCapabilitiesUnsupported = errors.New("capture: not supported on this plat
 
 // ErrControlNotFound reports that a hardware control element does not exist on
 // the device: no element has the requested id, or no element matches the capture
-// volume rule. It is matched with errors.Is on *ControlNotFoundError.
+// volume rule. It is matched with errors.Is on *ControlNotFoundError. Hardware
+// controls exist on Linux only; elsewhere OpenControls returns
+// ErrCapabilitiesUnsupported instead.
 var ErrControlNotFound = errors.New("capture: no such control")
 
 // BadDeviceError reports a device id that is not in any accepted form. On Linux
@@ -288,7 +291,7 @@ func (e *ConfigError) Error() string {
 // containing a NUL). With Pattern set, the capture volume helper found no element
 // matching its rule (an INTEGER mixer element, readable and writable and active,
 // named "Capture Volume" or ending in " Capture Volume"). It unwraps to
-// ErrControlNotFound.
+// ErrControlNotFound. It is returned on Linux only.
 type ControlNotFoundError struct {
 	ID      ControlID
 	Pattern bool
