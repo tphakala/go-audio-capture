@@ -31,8 +31,9 @@ var ErrDeviceInUse = errors.New("capture: device is in use by another applicatio
 // (which unwraps to it) when an id matches nothing present. A caller can
 // therefore retire the device with errors.Is(err, ErrDeviceGone) at any point
 // from resolution through the stream lifecycle. On Linux, OpenControls and the
-// Controls methods return it when the card behind the control device is gone or
-// is no longer the unit the DeviceInfo named. On Windows a Read parked while
+// Controls methods return it when the card behind the control device is gone,
+// or, for a DeviceInfo with a stable id, is no longer the unit it named; a
+// numeric hw:N,D id is not verified against a unit. On Windows a Read parked while
 // the endpoint is invalidated is not woken yet, so it may not return until
 // Close.
 var ErrDeviceGone = errors.New("capture: device is gone")
