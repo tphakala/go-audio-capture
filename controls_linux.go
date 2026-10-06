@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -328,7 +329,7 @@ func (c *Controls) Set(id ControlID, values []int64) error {
 		return err
 	}
 	bad := func(reason string) error {
-		return &ControlValueError{ID: info.ID, Values: slicesClone(values), Min: info.Min, Max: info.Max, Step: info.Step, Reason: reason}
+		return &ControlValueError{ID: info.ID, Values: slices.Clone(values), Min: info.Min, Max: info.Max, Step: info.Step, Reason: reason}
 	}
 	if !supportedType(info.Type) {
 		return bad("writing " + info.Type.String() + " elements is not supported")
@@ -350,14 +351,12 @@ func (c *Controls) Set(id ControlID, values []int64) error {
 	if err := c.h.WriteValues(eid, int32(info.Type), values); err != nil {
 		cerr := c.classify(info.ID, opWrite, err)
 		if cv, ok := errors.AsType[*ControlValueError](cerr); ok {
-			cv.Values, cv.Min, cv.Max, cv.Step = slicesClone(values), info.Min, info.Max, info.Step
+			cv.Values, cv.Min, cv.Max, cv.Step = slices.Clone(values), info.Min, info.Max, info.Step
 		}
 		return cerr
 	}
 	return nil
 }
-
-func slicesClone(v []int64) []int64 { return append([]int64(nil), v...) }
 
 // isCaptureVolume is the capture volume rule: an active, readable and writable
 // INTEGER mixer element named "Capture Volume" or ending in " Capture Volume".
