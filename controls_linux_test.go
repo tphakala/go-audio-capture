@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -789,5 +790,36 @@ func TestControlsAfterCloseReturnErrClosed(t *testing.T) {
 	}
 	if len(f.calls) != n {
 		t.Errorf("ioctls after Close: %v", f.calls[n:])
+	}
+}
+
+// TestControlsOutOfRangeFieldsAreNotFound pins that a ControlID field the
+// kernel's 32-bit tuple cannot hold names no element, instead of wrapping
+// onto one that exists.
+func TestControlsOutOfRangeFieldsAreNotFound(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("an int cannot exceed 32 bits here")
+	}
+	f := &fakeCtl{}
+	f.vol(plainVol, 0, 10, 0, 1)
+	c := newTestControls(f)
+	big := int64(1) << 32
+	for name, id := range map[string]ControlID{
+		"interface":   {Interface: ControlInterface(big + int64(ControlMixer)), Name: plainVol},
+		"device":      {Interface: ControlMixer, Device: int(big), Name: plainVol},
+		"subdevice":   {Interface: ControlMixer, Subdevice: int(big), Name: plainVol},
+		"index":       {Interface: ControlMixer, Index: int(big), Name: plainVol},
+		"neg-iface":   {Interface: -1, Name: plainVol},
+		"max-int-ifc": {Interface: ControlInterface(big>>1 + 0), Name: plainVol},
+	} {
+		if _, err := c.Get(id); !errors.Is(err, ErrControlNotFound) {
+			t.Errorf("%s: Get = %v, want ErrControlNotFound", name, err)
+		}
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("ioctls issued for out-of-range ids: %v", f.calls)
+	}
+	if _, err := c.Get(mixerID(plainVol)); err != nil {
+		t.Errorf("the in-range id no longer resolves: %v", err)
 	}
 }

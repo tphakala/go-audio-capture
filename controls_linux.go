@@ -134,9 +134,10 @@ func (c *Controls) classify(id ControlID, op int, err error) error {
 }
 
 // toElemID converts an id to the kernel's lookup tuple. The NumID is dropped. A
-// negative field or a name the kernel cannot hold names no element.
+// negative or out-of-range field (the kernel's tuple fields are 32 bits), or a
+// name the kernel cannot hold, names no element.
 func toElemID(id ControlID) (alsa.CtlElemID, error) {
-	if id.Interface < 0 || id.Device < 0 || id.Subdevice < 0 || id.Index < 0 ||
+	if id.Interface < 0 || int64(id.Interface) > math.MaxInt32 || id.Device < 0 || id.Subdevice < 0 || id.Index < 0 ||
 		int64(id.Device) > math.MaxUint32 || int64(id.Subdevice) > math.MaxUint32 || int64(id.Index) > math.MaxUint32 {
 		return alsa.CtlElemID{}, &ControlNotFoundError{ID: id}
 	}
