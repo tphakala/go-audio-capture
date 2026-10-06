@@ -38,17 +38,6 @@ func TestControlIDString(t *testing.T) {
 	}
 }
 
-func TestIsCapture(t *testing.T) {
-	for name, want := range map[string]bool{
-		"Mic Capture Volume": true, "Capture Volume": true, "Capture Channel Map": true,
-		"Playback Volume": false, "Recapture Volume": false,
-	} {
-		if got := (ControlInfo{ID: ControlID{Name: name}}).IsCapture(); got != want {
-			t.Errorf("IsCapture(%q) = %v, want %v", name, got, want)
-		}
-	}
-}
-
 func TestValueDB(t *testing.T) {
 	var scale ControlInfo
 	// -12.00 dB at raw 0, 0.50 dB per step to raw 40 (+8.00 dB); raw 0 is mute.

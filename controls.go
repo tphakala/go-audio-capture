@@ -194,14 +194,6 @@ func (i ControlInfo) ValueDB(raw int64) (db float64, ok bool) {
 	return 0, false
 }
 
-// IsCapture reports whether the element's name follows the ALSA convention for a
-// capture control: "Capture" as a word, as in "Mic Capture Volume".
-//
-//nolint:gocritic // hugeParam: see ValueDB.
-func (i ControlInfo) IsCapture() bool {
-	return strings.Contains(" "+i.ID.Name+" ", " Capture ")
-}
-
 // setDB records the parsed dB segments and the range they give.
 func (i *ControlInfo) setDB(segs []dbSegment) {
 	if len(segs) == 0 {
