@@ -3,12 +3,15 @@
 package alsa
 
 import (
+	"bytes"
 	"errors"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -332,8 +335,16 @@ func TestCtlRequestsNeverSendCallerNumid(t *testing.T) {
 	if mine.vals[0] != 3 {
 		t.Errorf("write landed on the wrong element: Mine = %d", mine.vals[0])
 	}
-	if len(k.numids) != 3 {
-		t.Fatalf("recorded %d requests, want 3", len(k.numids))
+	pick := k.add(newFakeElem("Pick", CtlTypeEnumerated, 1))
+	pick.items = []string{"Off", "On"}
+	pick.id.Numid = 9
+	enumID := pick.id
+	enumID.Numid = 1
+	if name, err := c.EnumItemName(enumID, 1); err != nil || name != "On" {
+		t.Errorf("EnumItemName with a stale numid = %q, %v, want On from Pick", name, err)
+	}
+	if len(k.numids) != 4 {
+		t.Fatalf("recorded %d requests, want 4", len(k.numids))
 	}
 	for i, n := range k.numids {
 		if n != 0 {
@@ -494,6 +505,9 @@ func TestCtlCloseWaitsForInflight(t *testing.T) {
 	fd := openDevNull(t)
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	var once sync.Once
+	releaseOnce := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(releaseOnce)
 	c := newCtl(fd, func(_ int, req uintptr, _ unsafe.Pointer) error {
 		if req == iocCtlPVersion {
 			close(entered)
@@ -505,13 +519,30 @@ func TestCtlCloseWaitsForInflight(t *testing.T) {
 	<-entered
 	done := make(chan struct{})
 	go func() { _ = c.Close(); close(done) }()
+	// Wait until Close has marked the handle closed; it must then still be
+	// blocked on the in-flight call, with the fd open.
+	for {
+		c.mu.Lock()
+		closed := c.closed
+		c.mu.Unlock()
+		if closed {
+			break
+		}
+		runtime.Gosched()
+	}
 	select {
 	case <-done:
 		t.Fatal("Close returned while an ioctl was in flight")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
-	close(release)
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil {
+		t.Fatalf("the fd was closed while an ioctl was in flight: %v", err)
+	}
+	releaseOnce()
 	<-done
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+		t.Errorf("the fd is still open after Close returned: %v", err)
+	}
 }
 
 func TestCtlNoIoctlAfterClose(t *testing.T) {
@@ -538,5 +569,131 @@ func TestCtlNoIoctlAfterClose(t *testing.T) {
 	}
 	if n := calls.Load(); n != 0 {
 		t.Errorf("%d ioctls reached the kernel after Close", n)
+	}
+}
+
+// le writes v as a little-endian integer of w bytes without the production
+// encoder, so the tests below do not agree with a wrong width by construction.
+func le(w int, v int64) []byte {
+	b := make([]byte, w)
+	for i := range b {
+		b[i] = byte(uint64(v) >> (8 * i))
+	}
+	return b
+}
+
+// kernelLong is the width of the kernel's `long` in a control value slot: 8 on
+// LP64 and 4 on the ILP32 targets, chosen by the platform word size, not by
+// the helpers under test.
+func kernelLong() int {
+	if strconv.IntSize == 64 {
+		return 8
+	}
+	return 4
+}
+
+func TestCtlSlotWidthsAndEncodingAreLiteral(t *testing.T) {
+	w := kernelLong()
+	for name, tt := range map[string]struct {
+		typ  int32
+		want int
+	}{
+		"boolean":    {CtlTypeBoolean, w},
+		"integer":    {CtlTypeInteger, w},
+		"enumerated": {CtlTypeEnumerated, 4},
+		"integer64":  {CtlTypeInteger64, 0},
+		"bytes":      {CtlTypeBytes, 0},
+		"iec958":     {CtlTypeIEC958, 0},
+	} {
+		if got := slotSize(tt.typ); got != tt.want {
+			t.Errorf("slotSize(%s) = %d, want %d", name, got, tt.want)
+		}
+	}
+	for _, v := range []int64{0, 1, -2, 0x01020304, -0x01020304} {
+		b := make([]byte, w)
+		encodeClong(b, v)
+		if !bytes.Equal(b, le(w, v)) {
+			t.Errorf("encodeClong(%d) = % x, want % x", v, b, le(w, v))
+		}
+		if got := decodeClong(le(w, v)); got != v {
+			t.Errorf("decodeClong(% x) = %d, want %d", le(w, v), got, v)
+		}
+	}
+}
+
+func TestCtlInfoDecodesLiteralBytes(t *testing.T) {
+	w := kernelLong()
+	c := newCtl(-1, func(_ int, req uintptr, arg unsafe.Pointer) error {
+		if req != iocCtlElemInfo {
+			return unix.ENOTTY
+		}
+		in := (*CtlElemInfo)(arg)
+		in.Type = CtlTypeInteger
+		in.Count = 1
+		in.Value = [128]byte{}
+		copy(in.Value[0:], le(w, -20))
+		copy(in.Value[w:], le(w, 100))
+		copy(in.Value[2*w:], le(w, 5))
+		return nil
+	})
+	got, err := c.Info(CtlElemID{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Min != -20 || got.Max != 100 || got.Step != 5 {
+		t.Errorf("Info decoded min %d max %d step %d from literal bytes, want -20 100 5", got.Min, got.Max, got.Step)
+	}
+}
+
+func TestOpenCtlFallsBackToReadOnlyOnlyOnEACCES(t *testing.T) {
+	const path = "/dev/snd/controlC3"
+	type call struct {
+		path string
+		mode int
+	}
+	for _, tt := range []struct {
+		name      string
+		errs      []error // result of each open, in order
+		wantCalls []int   // open modes tried, in order
+		wantErr   error
+	}{
+		{"rdwr works", []error{nil}, []int{unix.O_RDWR | unix.O_CLOEXEC}, nil},
+		{"eacces falls back", []error{unix.EACCES, nil}, []int{unix.O_RDWR | unix.O_CLOEXEC, unix.O_RDONLY | unix.O_CLOEXEC}, nil},
+		{"eacces twice", []error{unix.EACCES, unix.EACCES}, []int{unix.O_RDWR | unix.O_CLOEXEC, unix.O_RDONLY | unix.O_CLOEXEC}, unix.EACCES},
+		{"other error is not retried", []error{unix.ENOENT}, []int{unix.O_RDWR | unix.O_CLOEXEC}, unix.ENOENT},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls []call
+			swapOpenSeams(t, func(p string, mode int, _ uint32) (int, error) {
+				calls = append(calls, call{p, mode})
+				err := tt.errs[len(calls)-1]
+				if err != nil {
+					return -1, err
+				}
+				return openDevNull(t), nil
+			}, nil)
+			c, err := OpenCtl(3)
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("OpenCtl: %v", err)
+				}
+				_ = c.Close()
+			} else {
+				if !errors.Is(err, tt.wantErr) || c != nil {
+					t.Fatalf("OpenCtl = %v, %v, want a nil handle and %v", c, err, tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), path) {
+					t.Errorf("error %q does not name %s", err, path)
+				}
+			}
+			if len(calls) != len(tt.wantCalls) {
+				t.Fatalf("open called %d times, want %d: %v", len(calls), len(tt.wantCalls), calls)
+			}
+			for i, m := range tt.wantCalls {
+				if calls[i].path != path || calls[i].mode != m {
+					t.Errorf("open %d = %v, want %s mode %#x", i, calls[i], path, m)
+				}
+			}
+		})
 	}
 }
