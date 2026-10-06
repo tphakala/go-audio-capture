@@ -148,22 +148,39 @@ func TestNearestValidStaysInsideTheRangeAtTheEnds(t *testing.T) {
 	// Neither MinInt64 nor MinInt64+1 satisfies step 5 under the unsigned rule
 	// (2^63 mod 5 is 3), and wrapping target-d past MinInt64 reaches a value that
 	// does, which must not be returned.
-	if v, ok := nearestValid(math.MinInt64, math.MinInt64, math.MinInt64+1, 5); ok {
-		t.Errorf("nearestValid returned %d, want no value inside the range", v)
+	if v, ok, exh := nearestValid(math.MinInt64, math.MinInt64, math.MinInt64+1, 5); ok || !exh {
+		t.Errorf("nearestValid returned %d, exhaustive %v, want no value and the range exhausted", v, exh)
 	}
-	if v, ok := nearestValid(math.MaxInt64, math.MaxInt64-1, math.MaxInt64, 1<<62); ok {
-		t.Errorf("nearestValid returned %d at the top end, want no value inside the range", v)
+	if v, ok, exh := nearestValid(math.MaxInt64, math.MaxInt64-1, math.MaxInt64, 1<<62); ok || !exh {
+		t.Errorf("nearestValid returned %d, exhaustive %v at the top end, want no value and the range exhausted", v, exh)
 	}
 	for _, c := range []struct{ target, lo, hi int64 }{
 		{5, 10, 20},  // target below the range
 		{25, 10, 20}, // target above the range
 		{5, 20, 10},  // inverted range
 	} {
-		if v, ok := nearestValid(c.target, c.lo, c.hi, 1); ok {
+		if v, ok, _ := nearestValid(c.target, c.lo, c.hi, 1); ok {
 			t.Errorf("nearestValid(%d, %d, %d) = %d, want none", c.target, c.lo, c.hi, v)
 		}
 	}
-	if v, ok := nearestValid(7, 0, 20, 5); !ok || v != 5 {
+	if v, ok, _ := nearestValid(7, 0, 20, 5); !ok || v != 5 {
 		t.Errorf("nearestValid(7, 0, 20, 5) = %d, %v, want 5", v, ok)
+	}
+	// 0 and 2e9 are both 1e9 away from 1e9, past the 2^20 probe bound, so the
+	// search stops before it covers the range.
+	if v, ok, exh := nearestValid(1_000_000_000, 0, 4_000_000_000, 2_000_000_000); ok || exh {
+		t.Errorf("nearestValid on a wide range = %d, %v, exhaustive %v, want not found and not exhaustive", v, ok, exh)
+	}
+}
+
+func TestValueDBOverAnInt64WideRange(t *testing.T) {
+	var info ControlInfo
+	info.db = []dbSegment{{rawMin: math.MinInt64, rawMax: math.MaxInt64, minCdB: -1000, maxCdB: 0}}
+	got, ok := info.ValueDB(0)
+	if !ok || math.Abs(got-(-5)) > 1e-6 {
+		t.Errorf("ValueDB(0) = %v, %v, want -5 dB halfway through the range", got, ok)
+	}
+	if got, ok := info.ValueDB(math.MaxInt64); !ok || got != 0 {
+		t.Errorf("ValueDB(max) = %v, %v, want 0 dB", got, ok)
 	}
 }

@@ -3,6 +3,7 @@
 package alsa
 
 import (
+	"math"
 	"slices"
 	"testing"
 )
@@ -90,6 +91,16 @@ func TestParseDB(t *testing.T) {
 			tlv:    item(tlvContainer, cat(scale(-600, 100), scale(-100, 10))...),
 			rawMin: 0, rawMax: 3, wantOK: true,
 			want: []DBSegment{{RawMin: 0, RawMax: 3, MinCdB: -600, MaxCdB: -300}},
+		},
+		{
+			name:   "container with a scale then a malformed dB child is malformed",
+			tlv:    item(tlvContainer, cat(scale(-600, 100), item(tlvDBScale, w(-100)))...),
+			rawMin: 0, rawMax: 3,
+		},
+		{
+			name:   "scale over a range too wide to be a control is refused",
+			tlv:    scale(-600, 100),
+			rawMin: math.MinInt64, rawMax: math.MaxInt64,
 		},
 		{name: "db linear is not understood", tlv: item(2, w(-600), 0), rawMin: 0, rawMax: 3},
 		{

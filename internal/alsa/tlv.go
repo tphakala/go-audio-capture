@@ -12,6 +12,10 @@ const (
 	tlvDBMinMax     = 4
 	tlvDBMinMaxMute = 5
 
+	// tlvMaxRawSpan bounds rawMax-rawMin for a DB_SCALE item: with a step of at
+	// most 0xffff the dB range then stays far inside int64.
+	tlvMaxRawSpan = 1 << 40
+
 	tlvDBScaleMask = 0xffff  // SNDRV_CTL_TLVD_DB_SCALE_MASK: step, in 0.01 dB
 	tlvDBScaleMute = 0x10000 // SNDRV_CTL_TLVD_DB_SCALE_MUTE: the lowest raw value is mute
 
@@ -74,6 +78,11 @@ func parseDBItem(w []uint32, rawMin, rawMax int64, depth int) ([]DBSegment, bool
 		if len(body) < 2 {
 			return nil, false
 		}
+		// The dB at the top is minDB + span*step; a span this wide cannot be a real
+		// control, and rejecting it keeps that product inside int64.
+		if uint64(rawMax)-uint64(rawMin) > tlvMaxRawSpan {
+			return nil, false
+		}
 		minDB := int64(int32(body[0]))
 		step := int64(body[1] & tlvDBScaleMask)
 		return []DBSegment{{
@@ -134,21 +143,37 @@ func parseDBRange(body []uint32) ([]DBSegment, bool) {
 
 // parseDBContainer returns the dB segments of the first child that carries dB
 // information. Children of other kinds (a channel map next to a volume's dB) are
-// skipped; a child whose length is inconsistent with the container is an error,
-// wherever it sits among the children.
+// skipped; a child whose length is inconsistent with the container, or a child of
+// a dB kind that does not parse, is an error wherever it sits among the children.
 func parseDBContainer(body []uint32, rawMin, rawMax int64, depth int) ([]DBSegment, bool) {
 	var found []DBSegment
 	for len(body) > 0 {
-		_, _, total, ok := tlvBody(body)
+		typ, _, total, ok := tlvBody(body)
 		if !ok {
 			return nil, false
 		}
 		// Keep the first dB child but still walk the rest, so a truncated or
-		// oversized child after it makes the whole TLV malformed.
-		if segs, ok := parseDBItem(body[:total], rawMin, rawMax, depth+1); ok && found == nil {
+		// oversized child after it makes the whole TLV malformed. A child of a dB
+		// kind that does not parse is malformed too; only other kinds (a channel
+		// map) are skipped.
+		segs, ok := parseDBItem(body[:total], rawMin, rawMax, depth+1)
+		switch {
+		case ok && found == nil:
 			found = segs
+		case !ok && isDBKind(typ):
+			return nil, false
 		}
 		body = body[total:]
 	}
 	return found, found != nil
+}
+
+// isDBKind reports whether typ is a TLV kind that carries dB information.
+func isDBKind(typ uint32) bool {
+	switch typ {
+	case tlvDBScale, tlvDBMinMax, tlvDBMinMaxMute, tlvDBRange, tlvContainer:
+		return true
+	default:
+		return false
+	}
 }

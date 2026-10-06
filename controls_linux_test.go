@@ -762,8 +762,17 @@ func TestSetCaptureVolumePercent(t *testing.T) {
 	t.Run("no valid step value", func(t *testing.T) {
 		f := &fakeCtl{}
 		f.vol(micVol, 1, 4, 5, 1) // no multiple of 5 in 1..4
-		if _, err := newTestControls(f).SetCaptureVolumePercent(50); !isValueErr(err) {
-			t.Errorf("err = %v, want *ControlValueError", err)
+		_, err := newTestControls(f).SetCaptureVolumePercent(50)
+		if ve, ok := errors.AsType[*ControlValueError](err); !ok || !strings.Contains(ve.Reason, "no value in the range") {
+			t.Errorf("err = %v, want *ControlValueError saying no value in the range satisfies the step rule", err)
+		}
+	})
+	t.Run("search limit reached on a very wide range", func(t *testing.T) {
+		f := &fakeCtl{}
+		f.vol(micVol, 0, 4_000_000_000, 2_000_000_000, 1) // 25% is 1e9 from both valid values
+		_, err := newTestControls(f).SetCaptureVolumePercent(25)
+		if ve, ok := errors.AsType[*ControlValueError](err); !ok || !strings.Contains(ve.Reason, "search limit") {
+			t.Errorf("err = %v, want *ControlValueError naming the search limit", err)
 		}
 	})
 }

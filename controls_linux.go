@@ -430,9 +430,13 @@ func (c *Controls) SetCaptureVolumePercent(percent float64) (raw int64, err erro
 		return 0, err
 	}
 	target := interpolate(info.Min, info.Max, percent)
-	v, ok := nearestValid(target, info.Min, info.Max, info.Step)
+	v, ok, exhaustive := nearestValid(target, info.Min, info.Max, info.Step)
 	if !ok {
-		return 0, &ControlValueError{ID: info.ID, Min: info.Min, Max: info.Max, Step: info.Step, Reason: "no value satisfying the step rule was found near the target within the search limit"}
+		reason := "no value satisfying the step rule was found within the search limit of the target"
+		if exhaustive {
+			reason = "no value in the range satisfies the step rule"
+		}
+		return 0, &ControlValueError{ID: info.ID, Min: info.Min, Max: info.Max, Step: info.Step, Reason: reason}
 	}
 	vals := make([]int64, info.Count)
 	for i := range vals {

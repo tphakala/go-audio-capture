@@ -189,7 +189,9 @@ func (i ControlInfo) ValueDB(raw int64) (db float64, ok bool) {
 		}
 		cdb := float64(s.minCdB)
 		if s.rawMax > s.rawMin {
-			cdb += float64(raw-s.rawMin) * float64(s.maxCdB-s.minCdB) / float64(s.rawMax-s.rawMin)
+			// Subtract in float64: the raw span can be as wide as the int64 range.
+			cdb += (float64(raw) - float64(s.rawMin)) * (float64(s.maxCdB) - float64(s.minCdB)) /
+				(float64(s.rawMax) - float64(s.rawMin))
 		}
 		return cdb / 100, true
 	}
@@ -216,13 +218,14 @@ func stepOK(v, step int64) bool {
 
 // nearestValid returns the value closest to target inside [lo, hi] that satisfies
 // the step rule, preferring the lower one on a tie. The search is bounded to
-// 2^20 values either side of target; ok is false when none was found within it,
-// which is not proof that none exists for a very wide range with a very large
-// step.
-func nearestValid(target, lo, hi, step int64) (v int64, ok bool) {
+// 2^20 values either side of target. When none is found, exhaustive tells
+// whether the whole range was covered (no value satisfies the rule) or the bound
+// was reached first (a very wide range with a very large step may still hold
+// one).
+func nearestValid(target, lo, hi, step int64) (v int64, ok, exhaustive bool) {
 	const maxProbe = 1 << 20
 	if lo > hi || target < lo || target > hi {
-		return 0, false
+		return 0, false, true
 	}
 	for d := range int64(maxProbe) {
 		// With lo <= target <= hi the distances are exact in uint64, so the
@@ -230,14 +233,14 @@ func nearestValid(target, lo, hi, step int64) (v int64, ok bool) {
 		below := uint64(target)-uint64(lo) >= uint64(d)
 		above := uint64(hi)-uint64(target) >= uint64(d)
 		if !below && !above {
-			return 0, false
+			return 0, false, true
 		}
 		if below && stepOK(target-d, step) {
-			return target - d, true
+			return target - d, true, false
 		}
 		if above && stepOK(target+d, step) {
-			return target + d, true
+			return target + d, true, false
 		}
 	}
-	return 0, false
+	return 0, false, false
 }
