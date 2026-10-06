@@ -10,8 +10,7 @@ type Controls struct{}
 // ErrCapabilitiesUnsupported so callers can leave the device gain alone.
 //
 //nolint:gocritic // hugeParam: DeviceInfo is passed by value like OpenDevice.
-func OpenControls(d DeviceInfo) (*Controls, error) {
-	_ = d
+func OpenControls(_ DeviceInfo) (*Controls, error) {
 	return nil, ErrCapabilitiesUnsupported
 }
 
@@ -22,21 +21,17 @@ func (c *Controls) Close() error { return nil }
 func (c *Controls) List() ([]ControlInfo, error) { return nil, ErrCapabilitiesUnsupported }
 
 // Info returns ErrCapabilitiesUnsupported.
-func (c *Controls) Info(id ControlID) (ControlInfo, error) {
-	_ = id
+func (c *Controls) Info(_ ControlID) (ControlInfo, error) {
 	return ControlInfo{}, ErrCapabilitiesUnsupported
 }
 
 // Get returns ErrCapabilitiesUnsupported.
-func (c *Controls) Get(id ControlID) ([]int64, error) {
-	_ = id
+func (c *Controls) Get(_ ControlID) ([]int64, error) {
 	return nil, ErrCapabilitiesUnsupported
 }
 
 // Set returns ErrCapabilitiesUnsupported.
-func (c *Controls) Set(id ControlID, values []int64) error {
-	_ = id
-	_ = values
+func (c *Controls) Set(_ ControlID, _ []int64) error {
 	return ErrCapabilitiesUnsupported
 }
 
@@ -46,7 +41,6 @@ func (c *Controls) CaptureVolume() (ControlInfo, error) {
 }
 
 // SetCaptureVolumePercent returns ErrCapabilitiesUnsupported.
-func (c *Controls) SetCaptureVolumePercent(percent float64) (raw int64, err error) {
-	_ = percent
+func (c *Controls) SetCaptureVolumePercent(_ float64) (raw int64, err error) {
 	return 0, ErrCapabilitiesUnsupported
 }
