@@ -226,26 +226,30 @@ Platform gaps: Windows does not detect a stalled driver or a delivery shortfall 
 
 ## Performance vs malgo/miniaudio
 
-This library exists for debuggability and a clean cgo-free build, not for raw speed, and a direct measurement bears that out: at typical capture rates the CPU cost is the same, and the measurable wins are memory and process footprint.
+This library exists for debuggability and a clean cgo-free build, not for raw speed. Measured against malgo (Go bindings for miniaudio, cgo), it uses less CPU on a Raspberry Pi 4, about half the resident memory and two fewer OS threads, and it never crosses into C.
 
-Both paths captured from the same USB interface at its native 48 kHz / 2 ch / S32LE, so neither side resampled or converted. The malgo path used miniaudio defaults with `Alsa.NoMMap=1` and the device selected by id, a typical cgo capture setup. Each figure is the mean of three 60 s steady-state windows (3 s warmup discarded), self-measured with `getrusage(RUSAGE_SELF)` (which aggregates miniaudio's own capture thread), Go `runtime.MemStats`, and `/proc/self/status`. The native binary was built `CGO_ENABLED=0`.
+Setup: Raspberry Pi 4 (arm64, Cortex-A72), two USB devices captured at their native formats so neither side resampled or converted: a Focusrite Scarlett Solo 4th Gen at 48 kHz / 4 ch / S32LE and a 384 kHz AudioMoth at 384 kHz / 1 ch / S16LE. The consumer only counts delivered frames. Each figure is the mean of three 60 s steady-state windows after a 3 s warmup, measured in-process with `getrusage(RUSAGE_SELF)` (which includes miniaudio's capture thread), Go `runtime.MemStats` and `/proc/self/status`. This library ran at its default geometry (20 ms period, 4 periods) and was built `CGO_ENABLED=0`. malgo ran at miniaudio's defaults (10 ms period, 3 periods) on the `hw:` device in exclusive mode, with `Alsa.NoMMap=1`, automatic format, channel and rate conversion disabled, and the device's own channel map passed in (see below).
 
-| Metric (48 kHz stereo S32, 60 s window) | this library (pure Go) | malgo / miniaudio (cgo) |
-|---|---|---|
-| CPU, % of one core | ~0.42% | ~0.40% |
-| Peak resident memory (RSS) | 3.9 MB | 8.3 MB |
-| Go live heap | ~340 KiB | ~330 KiB |
-| Heap allocated over the window | ~6 KiB, 0 GC | ~6 KiB, 0 GC |
-| OS threads | 5 | 7 |
-| cgo calls / s | 0 | ~47 |
-| Dropped frames / xruns | 0 | 0 |
+| Metric (60 s window) | this library, 48 kHz 4 ch S32 | this library, 384 kHz 1 ch S16 | malgo, 48 kHz 4 ch S32 | malgo, 384 kHz 1 ch S16 |
+|---|---|---|---|---|
+| CPU, % of one core | 0.49% | 0.47% | 1.21% | 1.24% |
+| Peak resident memory (RSS) | 3.4 MB | 3.5 MB | 6.4 MB | 6.4 MB |
+| Go live heap | ~400 KiB | ~400 KiB | ~130 KiB | ~130 KiB |
+| Heap allocated over the window | 0, 0 GC | 0, 0 GC | 0, 0 GC | 0, 0 GC |
+| OS threads | 5 | 5 | 7 | 7 |
+| cgo calls / s | 0 | 0 | 100 | 100 |
+| Frames delivered / expected | 0.9998 | 0.9999 | 0.9998 | 0.9999 |
+| Xruns | 0 | 0 | 0 | 0 |
 
-- CPU is a wash. Both sit near 0.4% of one core, and the run-to-run spread is wider than the gap between them: steady-state capture is dominated by the same ALSA read syscall on both sides.
-- Resident memory is roughly 2x lower. The Go heap is tiny and near-identical on both, so the extra ~4 MB on the malgo side is miniaudio's C runtime and buffers, off-heap and invisible to Go's GC, visible only as process RSS.
-- Both are allocation-free in steady state (no GC cycles across 60 s), so neither adds GC pressure to a host application.
-- The cgo backend crosses the C/Go boundary about once per callback and runs two extra OS threads. The pure-Go backend does neither and links as a static binary with no libasound and no C toolchain.
+- CPU is about 2.5x lower at the default geometry. Run at malgo's geometry (10 ms period, 3 periods), this library used about 0.8% on both devices, still below malgo's 1.2%. Cost tracks wakeups rather than data rate: 384 kHz mono costs the same as 48 kHz 4-channel, and at 384 kHz the period is 7680 frames, one blocking `READI_FRAMES` ioctl per period.
+- Resident memory is about half. The Go heap is larger on this side because the read buffer lives in Go memory; miniaudio's buffers and C runtime are off-heap and show up only in RSS.
+- Both are allocation-free in steady state (no GC cycles in any window), so neither adds GC pressure to a host application.
+- malgo crosses the C/Go boundary once per callback and runs two extra OS threads. This library does neither and links as a static binary with no libasound and no C toolchain.
+- miniaudio's default channel map can cost far more than the capture itself. Without the device's map passed in, miniaudio assumes FL FR FC BC for 4 channels while the Scarlett reports FL FR FC LFE, so it converts every frame to float, mixes it through a weight matrix and converts it back: malgo then used 6.0% of a core at 48 kHz on the Scarlett, about 5x its passthrough cost. This library never remaps channels; it delivers what the device captures.
 
-Caveats: these numbers are one machine, one device, at 48 kHz. They do not cover high sample rates (for example 256 kHz ultrasonic), where zero-copy period handling could diverge, and they measure the bare capture path (counting delivered PCM), not any downstream conversion or routing.
+Earlier measurement on amd64 with a different USB interface at 48 kHz / 2 ch / S32LE, where the channel maps match and both sides pass through: CPU was a wash (about 0.4% of a core each) and peak RSS was 3.9 MB against 8.3 MB.
+
+Caveats: one Raspberry Pi 4 and two devices. These figures cover the bare capture path, not any downstream processing.
 
 ## Development
 
