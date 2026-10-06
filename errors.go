@@ -9,8 +9,9 @@ import (
 )
 
 // ErrClosed is returned by Stream.Read once the stream has been closed, and on
-// Linux by every method of a Controls handle once it has been closed. On other
-// platforms OpenControls returns ErrCapabilitiesUnsupported and no handle exists.
+// Linux by every method of a Controls handle except Close once it has been
+// closed (a second Close returns nil). On other platforms OpenControls returns
+// ErrCapabilitiesUnsupported and no handle exists.
 var ErrClosed = errors.New("capture: closed")
 
 // ErrExclusiveNotAllowed reports that the device cannot be opened for exclusive
