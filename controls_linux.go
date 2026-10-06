@@ -206,6 +206,7 @@ func (c *Controls) describe(eid alsa.CtlElemID, id ControlID, deep bool) (Contro
 			return ControlInfo{}, fmt.Errorf("capture: control %s has %d items, more than the %d supported", out.ID, ai.Items, alsa.CtlMaxItems)
 		}
 		if deep {
+			out.Items = make([]string, 0, ai.Items)
 			for i := range ai.Items {
 				name, err := c.h.EnumItemName(eid, i)
 				if err != nil {
@@ -328,6 +329,11 @@ func (c *Controls) Set(id ControlID, values []int64) error {
 	if err != nil {
 		return err
 	}
+	return c.set(eid, &info, values)
+}
+
+// set validates values against an already-read description and writes them.
+func (c *Controls) set(eid alsa.CtlElemID, info *ControlInfo, values []int64) error {
 	bad := func(reason string) error {
 		return &ControlValueError{ID: info.ID, Values: slices.Clone(values), Min: info.Min, Max: info.Max, Step: info.Step, Reason: reason}
 	}
@@ -366,10 +372,12 @@ func isCaptureVolume(i *ControlInfo) bool {
 		(i.ID.Name == "Capture Volume" || strings.HasSuffix(i.ID.Name, " Capture Volume"))
 }
 
-func (c *Controls) captureVolume(deep bool) (ControlInfo, error) {
-	all, err := c.list(deep)
+// captureMatch scans the card for the capture volume element without reading
+// item names or TLVs, and returns its lookup id and shallow description.
+func (c *Controls) captureMatch() (alsa.CtlElemID, ControlInfo, error) {
+	all, err := c.list(false)
 	if err != nil {
-		return ControlInfo{}, err
+		return alsa.CtlElemID{}, ControlInfo{}, err
 	}
 	var matches []ControlInfo
 	for i := range all {
@@ -379,15 +387,16 @@ func (c *Controls) captureVolume(deep bool) (ControlInfo, error) {
 	}
 	switch len(matches) {
 	case 0:
-		return ControlInfo{}, &ControlNotFoundError{Pattern: true}
+		return alsa.CtlElemID{}, ControlInfo{}, &ControlNotFoundError{Pattern: true}
 	case 1:
-		return matches[0], nil
+		eid, err := toElemID(matches[0].ID)
+		return eid, matches[0], err
 	default:
 		ids := make([]ControlID, len(matches))
 		for i := range matches {
 			ids[i] = matches[i].ID
 		}
-		return ControlInfo{}, &AmbiguousControlError{Matches: ids}
+		return alsa.CtlElemID{}, ControlInfo{}, &AmbiguousControlError{Matches: ids}
 	}
 }
 
@@ -397,7 +406,11 @@ func (c *Controls) captureVolume(deep bool) (ControlInfo, error) {
 // *AmbiguousControlError. It never prefers one candidate over another; pass the
 // ControlID you want to Set instead. It scans the card on every call.
 func (c *Controls) CaptureVolume() (ControlInfo, error) {
-	return c.captureVolume(true)
+	eid, info, err := c.captureMatch()
+	if err != nil {
+		return ControlInfo{}, err
+	}
+	return c.describe(eid, info.ID, true)
 }
 
 // SetCaptureVolumePercent sets the capture volume element to percent (0 to 100)
@@ -413,7 +426,7 @@ func (c *Controls) SetCaptureVolumePercent(percent float64) (raw int64, err erro
 	if math.IsNaN(percent) || percent < 0 || percent > 100 {
 		return 0, &ControlValueError{Reason: fmt.Sprintf("percent %v is outside 0..100", percent)}
 	}
-	info, err := c.captureVolume(false)
+	eid, info, err := c.captureMatch()
 	if err != nil {
 		return 0, err
 	}
@@ -426,7 +439,7 @@ func (c *Controls) SetCaptureVolumePercent(percent float64) (raw int64, err erro
 	for i := range vals {
 		vals[i] = v
 	}
-	if err := c.Set(info.ID, vals); err != nil {
+	if err := c.set(eid, &info, vals); err != nil {
 		return 0, err
 	}
 	return v, nil

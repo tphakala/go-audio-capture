@@ -974,3 +974,48 @@ func TestControlsListErrorsOnBrokenTLVOrItems(t *testing.T) {
 		}
 	})
 }
+
+// The capture volume helpers scan shallow: no item names or TLV reads for the
+// elements that are not the match, and no second description of the match when
+// setting.
+func TestCaptureVolumeScanIsShallow(t *testing.T) {
+	build := func() *fakeCtl {
+		f := &fakeCtl{}
+		v := f.vol(micVol, 0, 40, 0, 1)
+		v.access |= alsa.CtlAccessTLVRead
+		v.tlv = []uint32{1, 8, 0, 100}
+		other := f.vol("Playback Volume", 0, 40, 0, 1)
+		other.access |= alsa.CtlAccessTLVRead
+		other.tlv = []uint32{1, 8, 0, 100}
+		f.add("Mode", int32(ControlMixer), alsa.CtlTypeEnumerated, 1).items = []string{"A", "B", "C"}
+		return f
+	}
+	t.Run("Set", func(t *testing.T) {
+		f := build()
+		if _, err := newTestControls(f).SetCaptureVolumePercent(50); err != nil {
+			t.Fatal(err)
+		}
+		if n := f.count("info"); n != 3 {
+			t.Errorf("ELEM_INFO calls = %d, want 3 (one per element, the match not described again)", n)
+		}
+		if n := f.count("item") + f.count("tlv"); n != 0 {
+			t.Errorf("item name and TLV reads = %d, want 0", n)
+		}
+	})
+	t.Run("Get", func(t *testing.T) {
+		f := build()
+		info, err := newTestControls(f).CaptureVolume()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := f.count("info"); n != 4 {
+			t.Errorf("ELEM_INFO calls = %d, want 4 (three scanned, the match described once more)", n)
+		}
+		if n := f.count("item"); n != 0 {
+			t.Errorf("item name reads = %d, want 0", n)
+		}
+		if n := f.count("tlv"); n != 1 || !info.HasDB {
+			t.Errorf("TLV reads = %d, HasDB = %v, want 1 and true", n, info.HasDB)
+		}
+	})
+}
