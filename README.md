@@ -144,7 +144,7 @@ if err != nil {
 }
 c, err := capture.OpenControls(d)
 if err != nil {
-    return err // ErrDeviceGone if the card is not the unit d names
+    return err // ErrDeviceGone if a stable id's card is not the unit d names
 }
 defer c.Close()
 
@@ -167,7 +167,7 @@ if db, ok := info.ValueDB(raw); ok {
 
 `CaptureVolume` selects the one active, readable and writable INTEGER mixer element named `Capture Volume` or ending in ` Capture Volume`. No match is `*ControlNotFoundError` (which matches `ErrControlNotFound`); several is `*AmbiguousControlError` listing them. It never prefers one over another. `SetCaptureVolumePercent` maps the percentage linearly onto the raw range (`amixer set N%` does the same, in raw steps, not dB), rounds half away from zero, and moves to the nearest value the step rule accepts.
 
-Persist a `ControlID` (interface, device, subdevice, name, index), not its `NumID`: numeric ids are assigned in creation order and can name a different element after a driver reload or replug. Settings are not sticky: another mixer, PipeWire or `alsactl restore` can change the gain afterwards, and there is no read-back after `Set` (a driver that quantizes on write leaves a different value without an error, so call `Get`). A `Controls` handle is bound to the card it verified: after an unplug it returns `ErrDeviceGone` even if another unit takes the card number. Every other platform returns `ErrCapabilitiesUnsupported`. `gac-rec -controls`, `-set` and `-capture-volume` drive the same calls from the command line.
+Persist a `ControlID` (interface, device, subdevice, name, index), not its `NumID`: numeric ids are assigned in creation order and can name a different element after a driver reload or replug. Settings are not sticky: another mixer, PipeWire or `alsactl restore` can change the gain afterwards, and there is no read-back after `Set` (a driver that quantizes on write leaves a different value without an error, so call `Get`). A `Controls` handle opened from a stable id is bound to the card it verified: after an unplug it returns `ErrDeviceGone` even if another unit takes the card number. A numeric `hw:N,D` id is not verified, as with `OpenDevice`, and a control node that is missing on a present card is returned as the open error. Every other platform returns `ErrCapabilitiesUnsupported`. `gac-rec -controls`, `-set` and `-capture-volume` drive the same calls from the command line.
 
 ### Upgrading from v0.5.x
 
@@ -253,7 +253,7 @@ What a caller sees for each failure, and what to do about it. Anything `Read` re
 | Several controls match the capture volume rule (Linux) | `*AmbiguousControlError` | choose one from `List` and use `Set` |
 | Control read-only, inactive or write-locked by another application (Linux) | `*ControlAccessError` | nothing to set, or retry later if `Locked` |
 | Control value out of range, wrong count, off the step rule, unsupported type, or refused by the driver (Linux) | `*ControlValueError` (nothing written unless the driver refused) | pass a valid value |
-| Card unplugged or swapped during `OpenControls` or a control call (Linux) | `ErrDeviceGone` | close, wait for the device to reappear |
+| Card unplugged during `OpenControls` or a control call, or a stable id's card swapped (Linux) | `ErrDeviceGone` | close, wait for the device to reappear |
 | `Controls` used after `Close` (Linux) | `ErrClosed` | stop using it |
 | Two identical units with one serial (Linux) | `*AmbiguousDeviceError` | configure one of the listed ids |
 | Overrun, consumer too slow | none: recovered and counted in `Xruns()` | watch the counter |

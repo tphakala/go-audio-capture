@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 
@@ -43,20 +45,23 @@ var openCtl = func(card int) (ctlHandle, error) {
 // not persisted by this library; another mixer, a sound server or
 // "alsactl restore" can change them afterwards.
 //
-// The handle is bound to the card instance it was opened on (the identity is
-// verified after the open), so after an unplug it keeps failing with
-// ErrDeviceGone even if another unit takes the card number. Methods are safe for
-// concurrent use; Close may be called from another goroutine.
+// A handle opened from a stable id is bound to the card instance it was opened
+// on (the identity is verified after the open), so after an unplug it keeps
+// failing with ErrDeviceGone even if another unit takes the card number. A
+// handle opened from a numeric id is not verified against a unit. Methods are safe
+// for concurrent use; Close may be called from another goroutine.
 type Controls struct {
 	h      ctlHandle
 	closed atomic.Bool
 }
 
 // OpenControls opens the control device of the card d names. It resolves d the
-// way OpenDevice does (a stable id is re-verified against live sysfs after the
-// open, and a card that is not the unit d names gives ErrDeviceGone), so a
-// handle never talks to a different unit than the one asked for. Errors from
-// resolving d are those of OpenDevice.
+// way OpenDevice does. A stable id is re-verified against live sysfs after the
+// open, and a card that is not the unit d names gives ErrDeviceGone, so the
+// handle never talks to a different unit than the one asked for. A numeric
+// hw:N,D id is not verified (as in OpenDevice): it opens whatever holds that
+// card number. Errors from resolving d are those of OpenDevice. A control node
+// that is missing while the card is present is returned as the open error.
 //
 //nolint:gocritic // hugeParam: DeviceInfo is passed by value like OpenDevice.
 func OpenControls(d DeviceInfo) (*Controls, error) {
@@ -71,7 +76,12 @@ func OpenControls(d DeviceInfo) (*Controls, error) {
 		if verr := verifyCardIdentity(r); verr != nil {
 			return nil, verr
 		}
-		if alsa.IsDeviceGone(err) {
+		// ENODEV is the card disconnecting. ENOENT is the card gone only when its
+		// /proc/asound entry is gone too: with the card present it is a control
+		// node that is not there (a container that maps only the PCM node), which
+		// is the open error, not a lost device. A numeric id has no post-open
+		// identity check, so this is the only sign it went away.
+		if errors.Is(err, unix.ENODEV) || (errors.Is(err, unix.ENOENT) && !cardPresent(r.card)) {
 			return nil, ErrDeviceGone
 		}
 		return nil, err
@@ -146,6 +156,12 @@ func toElemID(id ControlID) (alsa.CtlElemID, error) {
 		return alsa.CtlElemID{}, &ControlNotFoundError{ID: id}
 	}
 	return e, nil
+}
+
+// cardPresent reports whether the card still has a /proc/asound entry.
+func cardPresent(card int) bool {
+	_, err := os.Stat(filepath.Join(procRoot, fmt.Sprintf("card%d", card)))
+	return err == nil
 }
 
 func fromElemID(e *alsa.CtlElemID) ControlID {

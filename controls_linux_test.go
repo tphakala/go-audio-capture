@@ -285,9 +285,9 @@ func TestOpenControlsFailedOpenOnStrangerIsDeviceGone(t *testing.T) {
 func TestOpenControlsOpenErrors(t *testing.T) {
 	useFixture(t, hostLayout())
 	d := mustResolve(t, wantSerialID)
-	withOpenCtl(t, func(int) (ctlHandle, error) { return nil, wrapErrno(unix.ENOENT) })
+	withOpenCtl(t, func(int) (ctlHandle, error) { return nil, wrapErrno(unix.ENODEV) })
 	if _, err := OpenControls(d); !errors.Is(err, ErrDeviceGone) {
-		t.Errorf("missing control node = %v, want ErrDeviceGone", err)
+		t.Errorf("ENODEV on open = %v, want ErrDeviceGone", err)
 	}
 	withOpenCtl(t, func(int) (ctlHandle, error) { return nil, wrapErrno(unix.EACCES) })
 	if _, err := OpenControls(d); !errors.Is(err, unix.EACCES) || errors.Is(err, ErrDeviceGone) {
@@ -821,5 +821,35 @@ func TestControlsOutOfRangeFieldsAreNotFound(t *testing.T) {
 	}
 	if _, err := c.Get(mixerID(plainVol)); err != nil {
 		t.Errorf("the in-range id no longer resolves: %v", err)
+	}
+}
+
+// TestOpenControlsMissingNodeOnPresentCardIsNotDeviceGone pins that a control
+// node that is not there (a container that maps only the PCM node) is reported
+// as the open error while the card itself is still present, so the caller does
+// not retire a working capture device.
+func TestOpenControlsMissingNodeOnPresentCardIsNotDeviceGone(t *testing.T) {
+	useFixture(t, hostLayout())
+	withOpenCtl(t, func(int) (ctlHandle, error) { return nil, wrapErrno(unix.ENOENT) })
+	for name, d := range map[string]DeviceInfo{
+		"stable id":  mustResolve(t, wantSerialID),
+		"numeric id": mustResolve(t, hwAddrCard1),
+	} {
+		_, err := OpenControls(d)
+		if !errors.Is(err, unix.ENOENT) || errors.Is(err, ErrDeviceGone) {
+			t.Errorf("%s: OpenControls = %v, want the wrapped ENOENT and not ErrDeviceGone", name, err)
+		}
+	}
+}
+
+// TestOpenControlsNumericIdOnAbsentCardIsDeviceGone is the counterpart: a
+// numeric id has no post-open identity check, so ENOENT on a card number that
+// is no longer in /proc/asound is the only sign the device went away.
+func TestOpenControlsNumericIdOnAbsentCardIsDeviceGone(t *testing.T) {
+	useFixture(t, hostLayout())
+	withOpenCtl(t, func(int) (ctlHandle, error) { return nil, wrapErrno(unix.ENOENT) })
+	d := DeviceInfo{ID: "hw:7,0", Card: 7, Device: 0}
+	if _, err := OpenControls(d); !errors.Is(err, ErrDeviceGone) {
+		t.Fatalf("OpenControls = %v, want ErrDeviceGone", err)
 	}
 }
