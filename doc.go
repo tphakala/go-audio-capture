@@ -46,8 +46,15 @@
 // transition, so it does not disturb a device another process holds). It is
 // Linux-only and returns ErrCapabilitiesUnsupported on other platforms.
 //
+// OpenControls opens a card's ALSA control device for reading and writing
+// mixer elements such as capture gain (List, Info, Get, Set, and the
+// CaptureVolume and SetCaptureVolumePercent helpers, with dB read from the
+// element's TLV). It is Linux-only, returns ErrCapabilitiesUnsupported on other
+// platforms, and is never used by Open: opening a stream does not touch any
+// control.
+//
 // The public API (Devices, Resolve, Open, OpenDevice, Stream, SupportedRates,
-// SupportedRatesVerified) is platform-neutral; the Linux ALSA implementation
+// SupportedRatesVerified, OpenControls) is platform-neutral; the Linux ALSA implementation
 // lives in the *_linux.go files and internal/alsa, and the Windows WASAPI
 // implementation in the *_windows.go files and internal/wasapi. A macOS
 // CoreAudio backend is planned.

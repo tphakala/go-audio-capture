@@ -151,13 +151,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # linux/386 so the ILP32-tagged files (abi_ilp32.go, layout_ilp32_test.go)
-        # are linted, not just built and vetted.
+        # linux/386 and linux/arm so the ILP32-tagged files (abi_ilp32.go,
+        # layout_ilp32_test.go) and the per-ABI control layout files (abi_386.go,
+        # abi_arm.go, layout_386_test.go, layout_arm_test.go) are linted, not just
+        # built and vetted.
         include:
           - goos: linux
             goarch: amd64
           - goos: linux
             goarch: '386'
+          - goos: linux
+            goarch: arm
           - goos: windows
             goarch: amd64
     steps:

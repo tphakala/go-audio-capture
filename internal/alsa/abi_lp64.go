@@ -33,3 +33,17 @@ type sframes int64
 // in pcm.go. 1<<60 stays well below LONG_MAX (2^63-1, the kernel's signed
 // hw_ptr limit) with headroom for the *2 in the doubling loop.
 const boundaryCap uframes = 1 << 60
+
+// clong mirrors the kernel's C long, the element type of snd_ctl_elem_value's
+// integer array and of snd_ctl_elem_info's integer min/max/step. A defined type
+// for the same reason as uframes.
+type clong int64
+
+// ctlValueBytes is the size of the snd_ctl_elem_value value union: 128 longs.
+// ctlValuePad is the padding between the indirect word and the union: the union
+// holds a long long, so it is 8-aligned, which puts it at offset 72 (the 64-byte
+// id plus the 4-byte indirect word plus 4).
+const (
+	ctlValueBytes = 1024
+	ctlValuePad   = 4
+)

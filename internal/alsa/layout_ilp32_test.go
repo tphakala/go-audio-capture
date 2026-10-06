@@ -4,10 +4,14 @@ package alsa
 
 // ILP32 (386, arm) kernel ABI, verified 2026-09-03 by compiling the same
 // offsetof/sizeof probe against /usr/include/sound/asound.h with `gcc -m32`
-// (sizeof(long)=4, sizeof(void*)=4). With no 8-byte-aligned field remaining, the
-// maximum alignment is 4 and the layout is identical across every little-endian
-// ILP32 ABI, so the i386 probe is a valid oracle for arm too (ARM's 8-byte
-// alignment of long long/double never comes into play). A 32-bit process reaches
+// (sizeof(long)=4, sizeof(void*)=4). The PCM structures have no 8-byte-aligned
+// field, so the maximum alignment is 4 and their layout is identical across every
+// little-endian ILP32 ABI: the i386 probe is a valid oracle for arm there (ARM's
+// 8-byte alignment of long long/double never comes into play). The control
+// interface is the exception: snd_ctl_elem_value holds a long long, so its layout
+// differs between 386 (layout_386_test.go) and arm (layout_arm_test.go), and only
+// the structures and numbers below the "Control interface" comment are shared.
+// A 32-bit process reaches
 // these same numbers on a 64-bit kernel through the compat_ioctl path
 // (snd_pcm_ioctl_compat), so the GOARCH=386-on-x86_64 test run exercises the real
 // kernel ABI, not an emulation of it.
@@ -55,4 +59,19 @@ const (
 	wantIocDrop     = 0x4143
 	wantIocResume   = 0x4147
 	wantIocReadI    = 0x800c4151
+
+	// Control interface (snd_ctl_*), shared by 386 and arm. snd_ctl_elem_value
+	// is in layout_386_test.go and layout_arm_test.go.
+	wantCtlElemIDSize   = 64
+	wantCtlListSize     = 72
+	wantCtlListPids     = 16
+	wantCtlInfoSize     = 272
+	wantCtlInfoValue    = 80
+	wantCtlInfoReserved = 208
+	wantCtlTLVSize      = 8
+
+	wantIocCtlPVersion = 0x80045500
+	wantIocCtlElemList = 0xc0485510
+	wantIocCtlElemInfo = 0xc1105511
+	wantIocCtlTLVRead  = 0xc008551a
 )

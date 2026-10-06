@@ -27,6 +27,10 @@ const (
 
 	// iocMagic is the 'A' type byte all SNDRV_PCM_IOCTL_* commands share.
 	iocMagic = 'A'
+
+	// iocCtlMagic is the 'U' type byte all SNDRV_CTL_IOCTL_* commands share (the
+	// control interface on /dev/snd/controlC*), distinct from the PCM 'A'.
+	iocCtlMagic = 'U'
 )
 
 // ioc encodes an ioctl request number exactly as the kernel's _IOC macro does:
@@ -61,6 +65,20 @@ var (
 	iocDrop        = ioc(iocNone, iocMagic, 0x43, 0)
 	iocResume      = ioc(iocNone, iocMagic, 0x47, 0)
 	iocReadIFrames = ioc(iocRead, iocMagic, 0x51, unsafe.Sizeof(Xferi{}))
+)
+
+// SNDRV_CTL ioctl request numbers, derived from the Go struct sizes like the PCM
+// ones above and pinned in layout_test.go. ELEM_READ and ELEM_WRITE carry
+// snd_ctl_elem_value, whose size differs between the 386 and arm ABIs (see
+// abi_386.go and abi_arm.go). TLV_READ encodes only the 8-byte snd_ctl_tlv
+// header; the TLV payload follows it in the caller's buffer.
+var (
+	iocCtlPVersion  = ioc(iocRead, iocCtlMagic, 0x00, unsafe.Sizeof(int32(0)))
+	iocCtlElemList  = ioc(iocRead|iocWrite, iocCtlMagic, 0x10, unsafe.Sizeof(ctlElemList{}))
+	iocCtlElemInfo  = ioc(iocRead|iocWrite, iocCtlMagic, 0x11, unsafe.Sizeof(CtlElemInfo{}))
+	iocCtlElemRead  = ioc(iocRead|iocWrite, iocCtlMagic, 0x12, unsafe.Sizeof(ctlElemValue{}))
+	iocCtlElemWrite = ioc(iocRead|iocWrite, iocCtlMagic, 0x13, unsafe.Sizeof(ctlElemValue{}))
+	iocCtlTLVRead   = ioc(iocRead|iocWrite, iocCtlMagic, 0x1a, unsafe.Sizeof(ctlTLVHeader{}))
 )
 
 // ioctl issues a raw ioctl. arg points at the command's argument struct; the
