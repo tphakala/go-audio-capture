@@ -29,10 +29,9 @@ func rangeText(e *capture.ControlInfo) string {
 		return strings.Join(e.Items, "/")
 	case capture.ControlBoolean:
 		return "0..1"
-	case capture.ControlBytes, capture.ControlIEC958, capture.ControlInteger64:
+	default:
 		return "-"
 	}
-	return "-"
 }
 
 func dbText(e *capture.ControlInfo) string {
