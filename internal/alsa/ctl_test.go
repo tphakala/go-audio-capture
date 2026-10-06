@@ -505,22 +505,25 @@ func TestCtlCloseWaitsForInflight(t *testing.T) {
 	fd := openDevNull(t)
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	probed := make(chan struct{})
 	var once sync.Once
 	releaseOnce := func() { once.Do(func() { close(release) }) }
 	t.Cleanup(releaseOnce)
+	// fdErr is the state of the fd seen from inside the blocked ioctl, after it
+	// is released and before it returns: Close must not have closed the fd yet.
+	var fdErr error
 	c := newCtl(fd, func(_ int, req uintptr, _ unsafe.Pointer) error {
 		if req == iocCtlPVersion {
 			close(entered)
 			<-release
+			_, fdErr = unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
 		}
 		return nil
 	})
-	go func() { _ = c.Probe() }()
+	go func() { _ = c.Probe(); close(probed) }()
 	<-entered
 	done := make(chan struct{})
 	go func() { _ = c.Close(); close(done) }()
-	// Wait until Close has marked the handle closed; it must then still be
-	// blocked on the in-flight call, with the fd open.
 	for {
 		c.mu.Lock()
 		closed := c.closed
@@ -530,16 +533,22 @@ func TestCtlCloseWaitsForInflight(t *testing.T) {
 		}
 		runtime.Gosched()
 	}
-	select {
-	case <-done:
-		t.Fatal("Close returned while an ioctl was in flight")
-	default:
-	}
-	if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil {
-		t.Fatalf("the fd was closed while an ioctl was in flight: %v", err)
+	// A Close that did not wait would finish within microseconds of setting
+	// closed; give it far more scheduling turns than that before releasing.
+	for range 5000 {
+		select {
+		case <-done:
+			t.Fatal("Close returned while an ioctl was in flight")
+		default:
+		}
+		runtime.Gosched()
 	}
 	releaseOnce()
+	<-probed
 	<-done
+	if fdErr != nil {
+		t.Errorf("the fd was closed while the ioctl was still in flight: %v", fdErr)
+	}
 	if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
 		t.Errorf("the fd is still open after Close returned: %v", err)
 	}
