@@ -202,10 +202,9 @@ func (c *Controls) describe(eid alsa.CtlElemID, id ControlID, deep bool) (Contro
 		out.Min, out.Max, out.Step = ai.Min, ai.Max, ai.Step
 	case ControlEnumerated:
 		out.Max = int64(ai.Items) - 1
-		if ai.Items > alsa.CtlMaxItems {
-			return ControlInfo{}, fmt.Errorf("capture: control %s has %d items, more than the %d supported", out.ID, ai.Items, alsa.CtlMaxItems)
-		}
-		if deep {
+		// An element with more items than the cap is listed without names, so
+		// one such element cannot hide the rest of the card.
+		if deep && ai.Items <= alsa.CtlMaxItems {
 			out.Items = make([]string, 0, ai.Items)
 			for i := range ai.Items {
 				name, err := c.h.EnumItemName(eid, i)

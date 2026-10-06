@@ -26,6 +26,9 @@ func rangeText(e *capture.ControlInfo) string {
 	case capture.ControlInteger:
 		return fmt.Sprintf("%d..%d step %d", e.Min, e.Max, e.Step)
 	case capture.ControlEnumerated:
+		if e.Items == nil {
+			return fmt.Sprintf("0..%d", e.Max)
+		}
 		return strings.Join(e.Items, "/")
 	case capture.ControlBoolean:
 		return "0..1"

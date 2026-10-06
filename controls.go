@@ -160,7 +160,9 @@ type ControlInfo struct {
 	// Min, Max and Step are the raw range of an INTEGER element; a BOOLEAN
 	// reports 0, 1 and 0. Step 0 means no step rule.
 	Min, Max, Step int64
-	// Items lists the names of an ENUMERATED element, in index order.
+	// Items lists the names of an ENUMERATED element, in index order. It is nil
+	// when the element has more items than the library fetches names for (1024);
+	// Max is still its last index.
 	Items []string
 	// HasDB reports that the element carries a dB TLV the library understood.
 	// MinDB and MaxDB are then the dB at the first and last end of the TLV's

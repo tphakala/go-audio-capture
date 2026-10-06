@@ -953,10 +953,31 @@ func TestControlsListErrorsOnBrokenTLVOrItems(t *testing.T) {
 	})
 	t.Run("too many enumerated items", func(t *testing.T) {
 		f := &fakeCtl{}
+		f.vol(plainVol, 0, 10, 0, 1)
 		en := f.add(enumName, int32(ControlMixer), alsa.CtlTypeEnumerated, 1)
 		en.items = make([]string, alsa.CtlMaxItems+1)
-		if _, err := newTestControls(f).List(); err == nil {
-			t.Error("List accepted an element with more items than the cap")
+		c := newTestControls(f)
+		list, err := c.List()
+		if err != nil {
+			t.Fatalf("List failed because of one element with more items than the cap: %v", err)
+		}
+		if len(list) != 2 {
+			t.Fatalf("List returned %d elements, want both", len(list))
+		}
+		var got *ControlInfo
+		for i := range list {
+			if list[i].ID.Name == enumName {
+				got = &list[i]
+			}
+		}
+		if got == nil {
+			t.Fatal("the oversized element is missing from List")
+		}
+		if got.Items != nil || got.Max != alsa.CtlMaxItems {
+			t.Errorf("oversized element: Items %v, Max %d, want no names and Max %d", got.Items, got.Max, alsa.CtlMaxItems)
+		}
+		if _, err := c.CaptureVolume(); err != nil {
+			t.Errorf("CaptureVolume failed on a card with an oversized enumerated element: %v", err)
 		}
 	})
 	t.Run("item name read fails", func(t *testing.T) {
