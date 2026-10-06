@@ -797,21 +797,26 @@ func TestControlsAfterCloseReturnErrClosed(t *testing.T) {
 // kernel's 32-bit tuple cannot hold names no element, instead of wrapping
 // onto one that exists.
 func TestControlsOutOfRangeFieldsAreNotFound(t *testing.T) {
-	if strconv.IntSize < 64 {
-		t.Skip("an int cannot exceed 32 bits here")
-	}
 	f := &fakeCtl{}
 	f.vol(plainVol, 0, 10, 0, 1)
 	c := newTestControls(f)
-	big := int64(1) << 32
-	for name, id := range map[string]ControlID{
-		"interface":   {Interface: ControlInterface(big + int64(ControlMixer)), Name: plainVol},
-		"device":      {Interface: ControlMixer, Device: int(big), Name: plainVol},
-		"subdevice":   {Interface: ControlMixer, Subdevice: int(big), Name: plainVol},
-		"index":       {Interface: ControlMixer, Index: int(big), Name: plainVol},
-		"neg-iface":   {Interface: -1, Name: plainVol},
-		"max-int-ifc": {Interface: ControlInterface(big>>1 + 0), Name: plainVol},
-	} {
+	ids := map[string]ControlID{
+		"neg-iface":     {Interface: -1, Name: plainVol},
+		"neg-device":    {Interface: ControlMixer, Device: -1, Name: plainVol},
+		"neg-subdevice": {Interface: ControlMixer, Subdevice: -1, Name: plainVol},
+		"neg-index":     {Interface: ControlMixer, Index: -1, Name: plainVol},
+	}
+	if strconv.IntSize >= 64 {
+		big := int64(1) << 32
+		ids["interface"] = ControlID{Interface: ControlInterface(big + int64(ControlMixer)), Name: plainVol}
+		ids["device"] = ControlID{Interface: ControlMixer, Device: int(big), Name: plainVol}
+		ids["subdevice"] = ControlID{Interface: ControlMixer, Subdevice: int(big), Name: plainVol}
+		ids["index"] = ControlID{Interface: ControlMixer, Index: int(big), Name: plainVol}
+		ids["max-int-ifc"] = ControlID{Interface: ControlInterface(big >> 1), Name: plainVol}
+		// A negative value that wraps to 0 when truncated to 32 bits.
+		ids["neg-device-wraps"] = ControlID{Interface: ControlMixer, Device: -int(big), Name: plainVol}
+	}
+	for name, id := range ids {
 		if _, err := c.Get(id); !errors.Is(err, ErrControlNotFound) {
 			t.Errorf("%s: Get = %v, want ErrControlNotFound", name, err)
 		}
