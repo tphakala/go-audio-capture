@@ -833,7 +833,7 @@ func TestOpenControlsMissingNodeOnPresentCardIsNotDeviceGone(t *testing.T) {
 	withOpenCtl(t, func(int) (ctlHandle, error) { return nil, wrapErrno(unix.ENOENT) })
 	for name, d := range map[string]DeviceInfo{
 		"stable id":  mustResolve(t, wantSerialID),
-		"numeric id": mustResolve(t, hwAddrCard1),
+		"numeric id": {ID: hwAddrCard1, Card: 1, Device: 0},
 	} {
 		_, err := OpenControls(d)
 		if !errors.Is(err, unix.ENOENT) || errors.Is(err, ErrDeviceGone) {
