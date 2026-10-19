@@ -156,7 +156,7 @@ Failure modes can be reproduced on real Linux hardware with `cmd/gac-rec`: hold 
 
 ## Commands
 
-Go 1.27, golangci-lint v2.14.0 (pinned in CI). Tasks are in `Taskfile.yml`.
+Go 1.27, golangci-lint v2.15.0 (pinned in CI). Tasks are in `Taskfile.yml`.
 
 The project targets the latest stable Go release and the latest tooling, not the oldest version that still works:
 
